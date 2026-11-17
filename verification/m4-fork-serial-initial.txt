@@ -1,0 +1,59 @@
+ok  	github.com/pocketbase/pocketbase	0.515s
+
+(!) No database is configured. Open the URL below to set up this instance:
+http://127.0.0.1:63805/_/#/pbinstall/<redacted>
+
+--- FAIL: TestCollectionsList (18.28s)
+    --- FAIL: TestCollectionsList/authorized_as_superuser_+_paging_and_sorting (2.19s)
+        api.go:274: Cannot find "name":"_mfas" in response body 
+            {"items":[{"id":"pbc_4275539003","listRule":"@request.auth.id != '' \u0026\u0026 recordRef = @request.auth.id \u0026\u0026 collectionRef = @request.auth.collectionId","viewRule":"@request.auth.id != '' \u0026\u0026 recordRef = @request.auth.id \u0026\u0026 collectionRef = @request.auth.collectionId","createRule":null,"updateRule":null,"deleteRule":"@request.auth.id != '' \u0026\u0026 recordRef = @request.auth.id \u0026\u0026 collectionRef = @request.auth.collectionId","name":"_authOrigins","type":"base","fields":[{"autogeneratePattern":"[a-z0-9]{15}","help":"","hidden":false,"id":"text3208210256","max":15,"min":15,"name":"id","pattern":"^[a-z0-9]+$","presentable":false,"primaryKey":true,"required":true,"system":true,"type":"text"},{"autogeneratePattern":"","help":"","hidden":false,"id":"text455797646","max":0,"min":0,"name":"collectionRef","pattern":"","presentable":false,"primaryKey":false,"required":true,"system":true,"type":"text"},{"autogeneratePattern":"","help":"","hidden":false,"id":"text127846527","max":0,"min":0,"name":"recordRef","pattern":"","presentable":false,"primaryKey":false,"required":true,"system":true,"type":"text"},{"autogeneratePattern":"","help":"","hidden":false,"id":"text4228609354","max":0,"min":0,"name":"fingerprint","pattern":"","presentable":false,"primaryKey":false,"required":true,"system":true,"type":"text"},{"hidden":false,"id":"autodate2990389176","name":"created","onCreate":true,"onUpdate":false,"presentable":false,"system":true,"type":"autodate"},{"hidden":false,"id":"autodate3332085495","name":"updated","onCreate":true,"onUpdate":true,"presentable":false,"system":true,"type":"autodate"}],"indexes":["CREATE UNIQUE INDEX `idx_authOrigins_unique_pairs` ON `authDevices` (collectionRef, recordRef, fingerprint)"],"created":"2024-06-20 12:10:52.542Z","updated":"2024-07-31 16:32:24.722Z","system":true},{"id":"pbc_1638494021","listRule":"@request.auth.id != '' \u0026\u0026 recordRef = @request.auth.id \u0026\u0026 collectionRef = @request.auth.collectionId","viewRule":"@request.auth.id != '' \u0026\u0026 recordRef = @request.auth.id \u0026\u0026 collectionRef = @request.auth.collectionId","createRule":null,"updateRule":null,"deleteRule":null,"name":"_otps","type":"base","fields":[{"autogeneratePattern":"[a-z0-9]{15}","help":"","hidden":false,"id":"text3208210256","max":15,"min":15,"name":"id","pattern":"^[a-z0-9]+$","presentable":false,"primaryKey":true,"required":true,"system":true,"type":"text"},{"autogeneratePattern":"","help":"","hidden":false,"id":"text455797646","max":0,"min":0,"name":"collectionRef","pattern":"","presentable":false,"primaryKey":false,"required":true,"system":true,"type":"text"},{"autogeneratePattern":"","help":"","hidden":false,"id":"text127846527","max":0,"min":0,"name":"recordRef","pattern":"","presentable":false,"primaryKey":false,"required":true,"system":true,"type":"text"},{"cost":8,"help":"","hidden":true,"id":"password901924565","max":0,"min":0,"name":"password","pattern":"","presentable":false,"required":true,"system":true,"type":"password"},{"hidden":false,"id":"autodate2990389176","name":"created","onCreate":true,"onUpdate":false,"presentable":false,"system":true,"type":"autodate"},{"hidden":false,"id":"autodate3332085495","name":"updated","onCreate":true,"onUpdate":true,"presentable":false,"system":true,"type":"autodate"},{"autogeneratePattern":"","help":"","hidden":true,"id":"text3866985172","max":0,"min":0,"name":"sentTo","pattern":"","presentable":false,"primaryKey":false,"required":false,"system":true,"type":"text"}],"indexes":["CREATE INDEX `idx_otps_collectionRef_recordRef` ON `otps` (\n  `collectionRef`,\n  `recordRef`\n)"],"created":"2024-06-20 09:29:22.901Z","updated":"2024-11-19 15:29:43.633Z","system":true}],"page":3,"perPage":2,"totalItems":20,"totalPages":10}
+FAIL
+FAIL	github.com/pocketbase/pocketbase/apis	139.628s
+ok  	github.com/pocketbase/pocketbase/cmd	1.963s
+?   	github.com/pocketbase/pocketbase/cmd/bucket	[no test files]
+ok  	github.com/pocketbase/pocketbase/core	214.145s
+ok  	github.com/pocketbase/pocketbase/core/validators	0.566s
+?   	github.com/pocketbase/pocketbase/examples/base	[no test files]
+ok  	github.com/pocketbase/pocketbase/forms	12.388s
+ok  	github.com/pocketbase/pocketbase/mails	0.825s
+?   	github.com/pocketbase/pocketbase/mails/templates	[no test files]
+?   	github.com/pocketbase/pocketbase/migrations	[no test files]
+ok  	github.com/pocketbase/pocketbase/plugins/ghupdate	(cached)
+ok  	github.com/pocketbase/pocketbase/plugins/jsvm	6.921s
+?   	github.com/pocketbase/pocketbase/plugins/jsvm/internal/types	[no test files]
+?   	github.com/pocketbase/pocketbase/plugins/jsvm/internal/types/generated	[no test files]
+ok  	github.com/pocketbase/pocketbase/plugins/migratecmd	1.259s
+ok  	github.com/pocketbase/pocketbase/plugins/update	(cached)
+?   	github.com/pocketbase/pocketbase/tests	[no test files]
+?   	github.com/pocketbase/pocketbase/tests/testdb	[no test files]
+ok  	github.com/pocketbase/pocketbase/tools/archive	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/auth	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/auth/internal/jwk	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/bucket	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/cron	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/dbutils	(cached)
+?   	github.com/pocketbase/pocketbase/tools/fileschema	[no test files]
+ok  	github.com/pocketbase/pocketbase/tools/filesystem	(cached)
+?   	github.com/pocketbase/pocketbase/tools/filesystem/blob	[no test files]
+?   	github.com/pocketbase/pocketbase/tools/filesystem/internal/fileblob	[no test files]
+ok  	github.com/pocketbase/pocketbase/tools/filesystem/internal/s3blob	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/filesystem/internal/s3blob/s3	(cached)
+?   	github.com/pocketbase/pocketbase/tools/filesystem/internal/s3blob/s3/tests	[no test files]
+ok  	github.com/pocketbase/pocketbase/tools/hook	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/inflector	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/list	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/logger	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/mailer	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/osutils	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/picker	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/router	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/routine	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/search	1.192s
+ok  	github.com/pocketbase/pocketbase/tools/security	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/store	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/subscriptions	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/template	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/tokenizer	(cached)
+ok  	github.com/pocketbase/pocketbase/tools/types	(cached)
+?   	github.com/pocketbase/pocketbase/ui	[no test files]
+FAIL

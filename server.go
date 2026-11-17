@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/compdani/pocketbase-mcp/protocol"
 )
@@ -312,14 +312,31 @@ func (s *Server) toolList(p Principal) []protocol.ToolDefinition {
 	}
 	tools := []protocol.ToolDefinition{describeAccessToolDefinition(), describeToolDefinition(names)}
 	for _, ct := range s.cfg.CustomTools {
-		if ct.Write && !s.cfg.AllowWrites {
+		if !s.customAllowed(p, ct) {
 			continue
 		}
 		sch := ct.InputSchema
 		if sch == nil {
 			sch = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
-		tools = append(tools, protocol.ToolDefinition{Name: ct.Name, Title: ct.Title, Description: ct.Description, InputSchema: sch, OutputSchema: ct.OutputSchema, Annotations: ct.Annotations})
+		ann := ct.Annotations
+		if ann == nil {
+			// Annotations are hints only; they never grant permission.
+			// Synthesize them from the declared effect when unset.
+			title := ct.Title
+			if title == "" {
+				title = ct.Name
+			}
+			if ct.effectKind() == "write" {
+				ann = &protocol.ToolAnnotations{Title: title, IdempotentHint: ct.Effects.Idempotent, OpenWorldHint: ct.Effects.ExternalAccess}
+			} else {
+				a := readOnlyAnnotations(title)
+				a.IdempotentHint = ct.Effects.Idempotent
+				a.OpenWorldHint = ct.Effects.ExternalAccess
+				ann = a
+			}
+		}
+		tools = append(tools, protocol.ToolDefinition{Name: ct.Name, Title: ct.Title, Description: ct.Description, InputSchema: sch, OutputSchema: ct.OutputSchema, Annotations: ann})
 	}
 	if len(visible) == 0 {
 		return tools
@@ -458,9 +475,8 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request, p Princi
 	base := s.baseURL(r)
 	toolErr := func(msg string) { writeToolError(w, id, msg) }
 	dispatchErr := func(err error) {
-		var te ToolError
-		if errors.As(err, &te) {
-			toolErr(string(te))
+		if msg, ok := UserMessage(err); ok {
+			toolErr(msg)
 			return
 		}
 		writeToolError(w, id, "Internal error while processing the request.")
@@ -475,21 +491,24 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request, p Princi
 	}
 	for _, ct := range s.cfg.CustomTools {
 		if ct.Name == call.Name {
-			if ct.Write && !s.cfg.AllowWrites {
-				toolErr("Writes are disabled.")
+			if !s.customAllowed(p, ct) {
+				s.emitAudit(p, call.Name, ct.effectKind(), "", "", "denied", time.Now(), id, nil)
+				toolErr("Tool is unavailable.")
 				return
 			}
-			out, err := ct.Handler(ctx, p, call.Arguments)
-			if err != nil {
-				dispatchErr(err)
-				return
-			}
-			writeToolResult(w, id, out)
+			s.callCustom(w, r, p, id, ct, call.Arguments)
 			return
 		}
 	}
 	dispatch := func(cfg *CollectionConfig, op string) {
+		start := time.Now()
+		outcome := "error"
+		defer func() {
+			s.emitAudit(p, call.Name, "", cfg.Name, op, outcome, start, id, s.auditPayload(call.Arguments))
+		}()
+
 		if ok, msg := s.canInvoke(p, cfg, op); !ok {
+			outcome = "denied"
 			toolErr(msg)
 			return
 		}
@@ -504,9 +523,11 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request, p Princi
 			out, err = s.host.Write(ctx, p, op, cfg, call.Arguments, base)
 		}
 		if err != nil {
+			outcome = AuditOutcome(err)
 			dispatchErr(err)
 			return
 		}
+		outcome = "ok"
 		writeToolResult(w, id, out)
 	}
 	if s.toolMode() == "generic" {
@@ -561,7 +582,7 @@ func (s *Server) handleDescribeAccess(w http.ResponseWriter, p Principal, id any
 	}
 	custom := []string{}
 	for _, ct := range s.cfg.CustomTools {
-		if ct.Write && !s.cfg.AllowWrites {
+		if !s.customAllowed(p, ct) {
 			continue
 		}
 		custom = append(custom, ct.Name)

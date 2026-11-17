@@ -1,0 +1,4 @@
+--- FAIL: TestSkipBootstrap (5.69s)
+    pocketbase_test.go:150: connect to postgres database failed
+FAIL
+FAIL	github.com/pocketbase/pocketbase	6.333s

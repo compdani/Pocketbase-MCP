@@ -188,7 +188,10 @@ func (m Manifest) ValidateStructural(registeredPolicies map[string]PolicyFunc, e
 	}
 	seenAlias := map[string]string{}
 	seenCollectionAlias := map[string]bool{}
-	toolNames := map[string]string{"describe_access": "built-in", "describe_collection": "built-in", "search": "generic", "fetch": "generic", "create": "generic", "update": "generic", "delete": "generic", "create_record": "reserved", "update_record": "reserved", "delete_record": "reserved"}
+	// Generic tool names (search/fetch/...) are only generated in generic
+	// mode; collisions with them are checked mode-specifically below, so a
+	// custom tool named e.g. "search" stays legal in per_collection mode.
+	toolNames := map[string]string{"describe_access": "built-in", "describe_collection": "built-in", "create_record": "reserved", "update_record": "reserved", "delete_record": "reserved"}
 	for _, n := range extraToolNames {
 		if prev, dup := toolNames[n]; dup {
 			add("manifest: custom tool name %q collides with %s", n, prev)

@@ -90,3 +90,20 @@ type ToolResult struct {
 	StructuredContent any   `json:"structuredContent,omitempty"`
 	IsError           bool  `json:"isError,omitempty"`
 }
+
+// EmbeddedResource carries a binary resource encoded with standard base64.
+type EmbeddedResource struct {
+	URI      string `json:"uri"`
+	MimeType string `json:"mimeType"`
+	Blob     string `json:"blob"`
+}
+type EmbeddedResourceContent struct {
+	Type     string           `json:"type"`
+	Resource EmbeddedResource `json:"resource"`
+}
+type ResourceLink struct {
+	Type     string `json:"type"`
+	URI      string `json:"uri"`
+	Name     string `json:"name"`
+	MimeType string `json:"mimeType,omitempty"`
+}

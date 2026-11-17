@@ -2,6 +2,7 @@ package pocketbasemcp
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/compdani/pocketbase-mcp/protocol"
@@ -42,6 +43,11 @@ type OAuthConfig struct {
 	PublicBaseURL string
 	// ExternalIssuer is required in external mode.
 	ExternalIssuer string
+	// IssuerBaseURL overrides, in native (pb-postgress) mode, the base URL of
+	// the app that hosts the sign-in (eg. "https://pocket.example.com").
+	// Empty uses the collection's OAuth2 server "sign-in app URL" setting,
+	// then this app's Application URL.
+	IssuerBaseURL string
 	// TokenDuration, when >0, issues non-refreshable static auth tokens with
 	// this lifetime from the module token endpoint. Zero uses the collection's
 	// normal auth token duration.
@@ -90,18 +96,39 @@ func (p CollectionPreset) AliasOrName() string {
 
 // ToolSpec is a custom tool registered by Go code (registry hook).
 type ToolSpec struct {
-	Name         string
-	Title        string
-	Description  string
-	InputSchema  map[string]any
-	OutputSchema map[string]any
-	Annotations  *protocol.ToolAnnotations
-	Write        bool // requires AllowWrites
-	Handler      func(ctx context.Context, p Principal, args map[string]any) (any, error)
+	Name              string
+	Title             string
+	Description       string
+	InputSchema       map[string]any
+	OutputSchema      map[string]any
+	Annotations       *protocol.ToolAnnotations
+	Write             bool // deprecated alias for Effects.Kind == "write"
+	Policy            string
+	Effects           Effects
+	Channels          string
+	ExecutionLocation string
+	Timeout           time.Duration
+	MaxResponseBytes  int64
+	Handler           func(ctx context.Context, call CallContext, args map[string]any) (any, error)
 }
 
 // Config configures a Server. Zero values get documented defaults.
+type Effects struct {
+	Kind           string // read or write
+	ExternalAccess bool
+	Idempotent     bool
+}
 type Config struct {
+	MaxToolTimeout          time.Duration
+	MaxResponseBytes        int64
+	DisableOutputValidation bool
+	Logger                  *slog.Logger
+	AuditFunc               AuditFunc
+	// AuditIncludePayload opts audit events into carrying a redacted copy
+	// of the call arguments (keys naming tokens, passwords or secrets are
+	// replaced). Default false: no payloads are audited.
+	AuditIncludePayload bool
+
 	Path           string // canonical MCP path, default "/mcp"
 	AliasPaths     []string
 	ServerName     string // default "github.com/compdani/pocketbase-mcp"
@@ -135,6 +162,15 @@ func (c Config) EffectiveManifest() Manifest {
 func (c Config) EffectiveToolMode() string { return c.EffectiveManifest().ToolMode }
 
 func (c Config) withDefaults() Config {
+	if c.MaxToolTimeout <= 0 {
+		c.MaxToolTimeout = 30 * time.Second
+	}
+	if c.MaxResponseBytes <= 0 {
+		c.MaxResponseBytes = 4 << 20
+	}
+	if c.Logger == nil {
+		c.Logger = slog.Default()
+	}
 	if c.Path == "" {
 		c.Path = "/mcp"
 	}

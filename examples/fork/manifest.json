@@ -7,26 +7,88 @@
       "collection": "items",
       "alias": "items",
       "description": "Item records available to the current user",
-      "operations": ["describe", "search", "fetch", "create", "update", "delete"],
+      "operations": [
+        "describe",
+        "search",
+        "fetch",
+        "create",
+        "update",
+        "delete"
+      ],
       "presentation": {
-        "titleFields": ["title"],
-        "summaryFields": ["title", "status", "price"]
+        "titleFields": [
+          "title"
+        ],
+        "summaryFields": [
+          "title",
+          "status",
+          "price"
+        ]
       },
       "fields": {
-        "read": ["id", "title", "status", "price", "owner", "created", "updated"],
-        "create": ["title", "status", "price", "owner"],
-        "update": ["title", "status", "price", "owner"]
+        "read": [
+          "id",
+          "title",
+          "status",
+          "price",
+          "owner",
+          "created",
+          "updated"
+        ],
+        "create": [
+          "title",
+          "status",
+          "price",
+          "owner"
+        ],
+        "update": [
+          "title",
+          "status",
+          "price",
+          "owner"
+        ]
       },
       "search": {
-        "textFields": ["title"],
-        "filters": {"status": ["eq", "in"], "price": ["eq", "gte", "lte"], "title": ["contains"]},
-        "sortFields": ["title", "status", "price", "created", "updated"],
-        "defaultSort": ["-updated"],
+        "textFields": [
+          "title"
+        ],
+        "filters": {
+          "status": [
+            "eq",
+            "in"
+          ],
+          "price": [
+            "eq",
+            "gte",
+            "lte"
+          ],
+          "title": [
+            "contains"
+          ]
+        },
+        "sortFields": [
+          "title",
+          "status",
+          "price",
+          "created",
+          "updated"
+        ],
+        "defaultSort": [
+          "-updated"
+        ],
         "defaultLimit": 20,
         "maxLimit": 50
       },
       "relations": {
-        "owner": {"target": "users", "fields": ["id", "name", "email"], "maxDepth": 1}
+        "owner": {
+          "target": "users",
+          "fields": [
+            "id",
+            "name",
+            "email"
+          ],
+          "maxDepth": 1
+        }
       },
       "policy": "authenticated"
     },
@@ -34,23 +96,102 @@
       "collection": "reports",
       "alias": "reports",
       "description": "Admin reports",
-      "operations": ["describe", "search", "fetch", "create", "update", "delete"],
+      "operations": [
+        "describe",
+        "search",
+        "fetch",
+        "create",
+        "update",
+        "delete"
+      ],
       "presentation": {
-        "titleFields": ["title"],
-        "summaryFields": ["title"]
+        "titleFields": [
+          "title"
+        ],
+        "summaryFields": [
+          "title"
+        ]
       },
       "fields": {
-        "read": ["id", "title", "created", "updated"],
-        "create": ["title"],
-        "update": ["title"]
+        "read": [
+          "id",
+          "title",
+          "created",
+          "updated"
+        ],
+        "create": [
+          "title"
+        ],
+        "update": [
+          "title"
+        ]
       },
       "search": {
-        "textFields": ["title"],
-        "filters": {"title": ["contains"]},
-        "sortFields": ["title", "created", "updated"],
-        "defaultSort": ["-updated"]
+        "textFields": [
+          "title"
+        ],
+        "filters": {
+          "title": [
+            "contains"
+          ]
+        },
+        "sortFields": [
+          "title",
+          "created",
+          "updated"
+        ],
+        "defaultSort": [
+          "-updated"
+        ]
       },
       "policy": "field:role:admin"
+    },
+    {
+      "collection": "contracts",
+      "alias": "contracts",
+      "description": "Contracts with protected PDF files (see the fetch_contract_pdf custom tool)",
+      "operations": [
+        "describe",
+        "search",
+        "fetch"
+      ],
+      "presentation": {
+        "titleFields": [
+          "title"
+        ],
+        "summaryFields": [
+          "title"
+        ]
+      },
+      "fields": {
+        "read": [
+          "id",
+          "title",
+          "contract_pdf",
+          "owner",
+          "created",
+          "updated"
+        ]
+      },
+      "search": {
+        "textFields": [
+          "title"
+        ],
+        "filters": {
+          "title": [
+            "contains"
+          ]
+        },
+        "sortFields": [
+          "title",
+          "created",
+          "updated"
+        ],
+        "defaultSort": [
+          "-updated"
+        ]
+      },
+      "policy": "authenticated"
     }
   ]
 }

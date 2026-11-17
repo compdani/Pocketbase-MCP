@@ -1,0 +1,13 @@
+# Compiled test-app binaries (go build in each example)
+/examples/stock/stock
+/examples/fork/fork
+
+# Go test binaries and coverage output
+*.test
+*.out
+
+# Local PocketBase data directories
+pb_data/
+
+# macOS
+.DS_Store

@@ -1,0 +1,2 @@
+ok  	github.com/compdani/pocketbase-mcp	0.072s
+?   	github.com/compdani/pocketbase-mcp/protocol	[no test files]

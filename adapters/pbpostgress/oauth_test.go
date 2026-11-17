@@ -1,14 +1,19 @@
 package pbpostgress
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
@@ -35,6 +40,14 @@ func newForkOAuthApp(t *testing.T) core.App {
 	}
 	t.Cleanup(func() { app.ResetBootstrapState() })
 	return app
+}
+
+// deleteWithoutHooks removes a test record from the shared database with a
+// plain SQL delete. app.Delete would start PocketBase's background storage
+// cleanup, which recreates <dataDir>/storage after the call returns and races
+// with t.TempDir's RemoveAll ("directory not empty").
+func deleteWithoutHooks(app core.App, record *core.Record) {
+	_, _ = app.DB().Delete(record.Collection().Name, dbx.HashExp{"id": record.Id}).Execute()
 }
 
 func forkCfg(mode string) pbmcp.Config {
@@ -154,10 +167,10 @@ func TestForkNativeMode(t *testing.T) {
 				t.Fatalf("module route %s exists in native mode: %d", p, rec.Code)
 			}
 		}
-		// Discovery additions belong to fork milestone 4.
+		// Native mode serves MCP resource metadata owned by this adapter.
 		rec := do(http.MethodGet, "/.well-known/oauth-protected-resource/mcp")
-		if rec.Code != 404 {
-			t.Fatalf("native mode added OAuth discovery: %d", rec.Code)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "/api/collections/users/oauth2-server") {
+			t.Fatalf("native resource metadata: %d %s", rec.Code, rec.Body.String())
 		}
 		// The fork's own native authorize endpoint exists (owned by the fork).
 		if rec := do(http.MethodGet, "/api/collections/users/oauth2-server/authorize?response_type=code&client_id=chatgpt-dev&redirect_uri=https://example.com/callback&state=x"); rec.Code == http.StatusNotFound {
@@ -208,7 +221,7 @@ func TestNativeOwnershipInventory(t *testing.T) {
 	srv.RegisterRoutes(r)
 	after := routeList(reflect.ValueOf(r), "")
 	for _, route := range after {
-		if strings.Contains(route, " /mcp") || strings.Contains(route, " /sse") {
+		if route == "GET /.well-known/oauth-protected-resource" || route == "GET /.well-known/oauth-protected-resource/mcp" || strings.Contains(route, " /mcp") || strings.Contains(route, " /sse") {
 			continue
 		}
 		found := false
@@ -223,5 +236,94 @@ func TestNativeOwnershipInventory(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, collectionNames(t, app)) || jobs != app.Cron().Total() || authHooks != app.OnRecordAuthWithPasswordRequest().Length() {
 		t.Fatal("native mode changed OAuth collections/jobs/auth hooks")
+	}
+}
+
+func TestNativeDiscoveryRegistrationPKCE(t *testing.T) {
+	app := newForkOAuthApp(t)
+	enableNative(t, app)
+	users, _ := app.FindCollectionByNameOrId("users")
+	users.OAuth2Server.Registration.Enabled = true
+	users.MFA.Enabled = false
+	if err := app.Save(users); err != nil {
+		t.Fatal(err)
+	}
+	user := core.NewRecord(users)
+	user.Set("email", "m4@example.com")
+	user.SetPassword("m4-password-12345")
+	if err := app.Save(user); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { deleteWithoutHooks(app, user) })
+	srv, err := New(app, forkCfg("native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := apis.NewRouter(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.RegisterRoutes(r)
+	mux, err := r.BuildMux()
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(method, path, body, ct, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		if ct != "" {
+			req.Header.Set("Content-Type", ct)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	parse := func(rec *httptest.ResponseRecorder) map[string]any {
+		var data map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &data); err != nil {
+			t.Fatalf("JSON %d %s", rec.Code, rec.Body.String())
+		}
+		return data
+	}
+	rec := do("POST", "/mcp", "", "", "")
+	if rec.Code != 401 || !strings.Contains(rec.Header().Get("WWW-Authenticate"), "resource_metadata=") {
+		t.Fatal(rec.Code, rec.Header())
+	}
+	md := parse(do("GET", "/.well-known/oauth-protected-resource/mcp", "", "", ""))
+	issuer := md["authorization_servers"].([]any)[0].(string)
+	u, _ := url.Parse(issuer)
+	as := parse(do("GET", "/.well-known/oauth-authorization-server"+u.Path, "", "", ""))
+	register, _ := url.Parse(as["registration_endpoint"].(string))
+	rec = do("POST", register.Path, `{"client_name":"M4 client","redirect_uris":["http://127.0.0.1:32123/callback"],"token_endpoint_auth_method":"none"}`, "application/json", "")
+	if rec.Code != 201 {
+		t.Fatalf("DCR %d %s", rec.Code, rec.Body.String())
+	}
+	client := parse(rec)["client_id"].(string)
+	verifier := strings.Repeat("a", 64)
+	sum := sha256.Sum256([]byte(verifier))
+	params := url.Values{"client_id": {client}, "redirect_uri": {"http://127.0.0.1:32123/callback"}, "response_type": {"code"}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(sum[:])}, "scope": {"openid"}}
+	rec = do("GET", u.Path+"/authorize?"+params.Encode(), "", "", "")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "unverified app") || !strings.Contains(rec.Body.String(), "127.0.0.1:32123") {
+		t.Fatalf("hosted page %d %s", rec.Code, rec.Body.String())
+	}
+	params.Set("identity", "m4@example.com")
+	params.Set("password", "m4-password-12345")
+	rec = do("POST", u.Path+"/authorize", params.Encode(), "application/x-www-form-urlencoded", "")
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	code := loc.Query().Get("code")
+	if code == "" {
+		t.Fatalf("login %d %s", rec.Code, rec.Body.String())
+	}
+	form := url.Values{"client_id": {client}, "redirect_uri": {"http://127.0.0.1:32123/callback"}, "grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {verifier}}
+	rec = do("POST", u.Path+"/token", form.Encode(), "application/x-www-form-urlencoded", "")
+	if rec.Code != 200 {
+		t.Fatalf("token %d %s", rec.Code, rec.Body.String())
+	}
+	token := parse(rec)["access_token"].(string)
+	rec = do("POST", "/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, "application/json", token)
+	if rec.Code != 200 || parse(rec)["error"] != nil {
+		t.Fatalf("tools %d %s", rec.Code, rec.Body.String())
 	}
 }

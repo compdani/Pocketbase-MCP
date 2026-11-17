@@ -59,7 +59,7 @@ func (a *Adapter) initOAuth() error {
 // login/logout handlers, code collections, cleanup jobs or OAuth hooks;
 // the fork owns those (milestone 4 adds fork-side root discovery).
 func (a *Adapter) registerOAuthRoutes(r *router.Router[*core.RequestEvent]) {
-	if !a.plan.Enabled || a.plan.EffectiveMode == pbmcp.OAuthModeNative {
+	if !a.plan.Enabled {
 		return
 	}
 	handler := func(e *core.RequestEvent) error {
@@ -67,7 +67,20 @@ func (a *Adapter) registerOAuthRoutes(r *router.Router[*core.RequestEvent]) {
 		issuer := a.plan.ExternalIssuer
 		if issuer == "" {
 			if a.plan.EffectiveMode == pbmcp.OAuthModeNative {
-				issuer = strings.TrimRight(base, "/") + "/api/collections/" + a.plan.Collection + "/oauth2-server"
+				// sign in on the configured app when several apps share the database
+				nativeBase := strings.TrimRight(a.cfg.OAuth.IssuerBaseURL, "/")
+				if nativeBase == "" {
+					if col, err := a.app.FindCachedCollectionByNameOrId(a.plan.Collection); err == nil {
+						nativeBase = col.OAuth2Server.IssuerBase()
+					}
+				}
+				if nativeBase == "" {
+					nativeBase = strings.TrimRight(a.app.Settings().Meta.AppURL, "/")
+				}
+				if nativeBase == "" {
+					nativeBase = strings.TrimRight(base, "/")
+				}
+				issuer = nativeBase + "/api/collections/" + a.plan.Collection + "/oauth2-server"
 			} else {
 				issuer = base
 			}

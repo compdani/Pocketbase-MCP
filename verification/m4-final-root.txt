@@ -1,0 +1,11 @@
+$ go build ./...
+exit=0
+$ go vet ./...
+exit=0
+$ go test -count=1 ./...
+ok  	github.com/compdani/pocketbase-mcp	0.111s
+?   	github.com/compdani/pocketbase-mcp/protocol	[no test files]
+exit=0
+$ gofmt -l <all module Go files>
+exit=0
+gofmt_clean=True

@@ -2,6 +2,7 @@ package pocketbasemcp
 
 import (
 	"context"
+	"errors"
 )
 
 // Principal is the host-neutral authenticated caller. No PocketBase types leak here.
@@ -105,6 +106,48 @@ func (c *CollectionConfig) RuleFor(op string) RuleState {
 		return c.DeleteRule
 	}
 	return RuleNil
+}
+
+// AccessError is a user-safe refusal from PocketBase record access. Message
+// is what the caller sees (a missing and a hidden record look alike, so
+// existence never leaks); Kind is for the server-side audit log only:
+// "not_found", "denied" or "invalid".
+type AccessError struct {
+	Message string
+	Kind    string
+}
+
+func (e AccessError) Error() string { return e.Message }
+
+// NotFound reports a missing record (or one outside this app's scope).
+func NotFound(msg string) error { return AccessError{Message: msg, Kind: "not_found"} }
+
+// Denied reports a refusal by policy or PocketBase rules.
+func Denied(msg string) error { return AccessError{Message: msg, Kind: "denied"} }
+
+// Invalid reports input that PocketBase rejected (validation).
+func Invalid(msg string) error { return AccessError{Message: msg, Kind: "invalid"} }
+
+// UserMessage returns the caller-safe message of a ToolError or AccessError.
+func UserMessage(err error) (string, bool) {
+	var ae AccessError
+	if errors.As(err, &ae) {
+		return ae.Message, true
+	}
+	var te ToolError
+	if errors.As(err, &te) {
+		return string(te), true
+	}
+	return "", false
+}
+
+// AuditOutcome maps a tool failure to an audit outcome.
+func AuditOutcome(err error) string {
+	var ae AccessError
+	if errors.As(err, &ae) && ae.Kind != "" {
+		return ae.Kind
+	}
+	return "error"
 }
 
 // ToolError is a user-visible tool failure (returned as isError, not a JSON-RPC error).

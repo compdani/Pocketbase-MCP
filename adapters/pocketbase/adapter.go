@@ -60,6 +60,9 @@ type Server struct {
 
 // New validates the manifest and builds the registry; it binds collection-change hooks (per server).
 func New(app core.App, cfg pbmcp.Config) (*Server, error) {
+	if err := cfg.ValidateCustomTools(); err != nil {
+		return nil, err
+	}
 	manifest := cfg.EffectiveManifest()
 	customNames := []string{}
 	for _, ct := range cfg.CustomTools {
@@ -670,14 +673,14 @@ func (a *Adapter) Search(_ context.Context, p pbmcp.Principal, cfg *pbmcp.Collec
 		return nil, err
 	}
 	if cfg.CollectionID != "" && collection.Id != cfg.CollectionID {
-		return nil, pbmcp.ToolError("You are not allowed to list " + cfg.Name + " records.")
+		return nil, pbmcp.Denied("You are not allowed to list " + cfg.Name + " records.")
 	}
 	if !a.collectionVisible(collection) {
-		return nil, pbmcp.ToolError("You are not allowed to list " + cfg.Name + " records.")
+		return nil, pbmcp.Denied("You are not allowed to list " + cfg.Name + " records.")
 	}
 	superuser := p.IsSuperuser
 	if collection.ListRule == nil && !superuser {
-		return nil, pbmcp.ToolError("You are not allowed to list " + cfg.Name + " records.")
+		return nil, pbmcp.Denied("You are not allowed to list " + cfg.Name + " records.")
 	}
 	where, params, err := buildSearchFilter(cfg, getStringArg(args, "query"), filterArgs(args))
 	if err != nil {
@@ -750,21 +753,21 @@ func (a *Adapter) Fetch(_ context.Context, p pbmcp.Principal, cfg *pbmcp.Collect
 		return nil, err
 	}
 	if cfg.CollectionID != "" && collection.Id != cfg.CollectionID {
-		return nil, pbmcp.ToolError(notFound)
+		return nil, pbmcp.NotFound(notFound)
 	}
 	if !a.collectionVisible(collection) {
-		return nil, pbmcp.ToolError(notFound)
+		return nil, pbmcp.NotFound(notFound)
 	}
 	record, err := a.app.FindRecordById(cfg.Name, recordID)
 	if err != nil {
-		return nil, pbmcp.ToolError(notFound)
+		return nil, pbmcp.NotFound(notFound)
 	}
 	canView, err := a.app.CanAccessRecord(record, info, record.Collection().ViewRule)
 	if err != nil {
 		return nil, err
 	}
 	if !canView {
-		return nil, pbmcp.ToolError(notFound)
+		return nil, pbmcp.Denied(notFound) // same message as missing: existence never leaks
 	}
 	if len(cfg.Expand) > 0 {
 		a.app.ExpandRecord(record, cfg.Expand, a.accessCheckedExpandFetch(info))
@@ -841,7 +844,21 @@ func (a *Adapter) Write(ctx context.Context, p pbmcp.Principal, operation string
 		return nil, err
 	}
 	if status >= 300 {
-		return nil, pbmcp.ToolError(describeAPIError(status, body))
+		msg := describeAPIError(status, body)
+		switch status {
+		case http.StatusNotFound:
+			return nil, pbmcp.NotFound(msg)
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return nil, pbmcp.Denied(msg)
+		case http.StatusBadRequest:
+			// PocketBase answers a failed create rule with a 400 that has
+			// no field errors; validation failures list the bad fields.
+			if apiErrorHasFieldErrors(body) {
+				return nil, pbmcp.Invalid(msg)
+			}
+			return nil, pbmcp.Denied(msg)
+		}
+		return nil, pbmcp.ToolError(msg)
 	}
 	if operation == "delete" {
 		return map[string]any{"deleted": true, "id": recordID, "collection": cfg.Name}, nil
@@ -1170,4 +1187,14 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// apiErrorHasFieldErrors reports whether a PocketBase API error lists field
+// validation errors (its "data" object is non-empty).
+func apiErrorHasFieldErrors(body []byte) bool {
+	var apiErr struct {
+		Data map[string]any `json:"data"`
+	}
+	_ = json.Unmarshal(body, &apiErr)
+	return len(apiErr.Data) > 0
 }
