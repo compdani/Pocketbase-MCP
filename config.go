@@ -2,18 +2,68 @@ package pocketbasemcp
 
 import (
 	"context"
+	"time"
 
 	"github.com/compdani/pocketbase-mcp/protocol"
 )
 
 // AuthConfig controls which PocketBase auth collections' tokens /mcp accepts.
 type AuthConfig struct {
+	// Collection is the single auth collection that owns OAuth login identity
+	// (e.g. "users"). It is also the default for Collections when OAuth is on.
+	Collection string
 	// Collections lists accepted auth collection names (e.g. ["users"]).
-	// Tokens from other collections are rejected with 401. If empty, every
-	// non-superuser token is rejected: accepted collections must be explicit.
+	// Tokens from other collections are rejected with 401. If empty and OAuth
+	// is off, every non-superuser token is rejected: accepted collections must
+	// be explicit. If empty and OAuth is on, it defaults to [Collection].
 	Collections []string
 	// AllowSuperusers permits _superusers tokens. Default false.
 	AllowSuperusers bool
+}
+
+// OAuthMode values for OAuthConfig.Mode.
+const (
+	OAuthModeAuto     = "auto"
+	OAuthModeNative   = "native"
+	OAuthModeModule   = "module"
+	OAuthModeExternal = "external"
+	OAuthModeOff      = "off"
+)
+
+// OAuthConfig controls OAuth ownership (plan section 3).
+type OAuthConfig struct {
+	Enabled bool
+	// Mode: auto|native|module|external|off. Empty means auto when Enabled.
+	Mode string
+	// Collection overrides Auth.Collection for the OAuth login identity.
+	Collection string
+	// PublicBaseURL is the externally visible base (no trailing slash).
+	// Falls back to Config.BaseURL / Config.PublicURL / request host.
+	PublicBaseURL string
+	// ExternalIssuer is required in external mode.
+	ExternalIssuer string
+	// TokenDuration, when >0, issues non-refreshable static auth tokens with
+	// this lifetime from the module token endpoint. Zero uses the collection's
+	// normal auth token duration.
+	TokenDuration time.Duration
+	// Endpoint path overrides (stock module mode). Defaults are applied by
+	// the stock provider: /oauth/login, /oauth/token, /oauth/userinfo,
+	// /oauth/register.
+	LoginPath    string
+	TokenPath    string
+	UserinfoPath string
+	RegisterPath string
+	// DisableRegistration turns off Dynamic Client Registration; only
+	// hand-created clients can sign in.
+	DisableRegistration bool
+	// RegistrationRedirectHosts, when non-empty, limits self-registered
+	// clients to redirect URIs on these hosts (exact host match; loopback is
+	// always allowed for native clients). Strongly recommended: tokens are
+	// full PocketBase sessions.
+	RegistrationRedirectHosts []string
+	// IDTokenSigningKey is retained for config compatibility. ID tokens are
+	// not issued in v1, so it is unused; never set it to the PB token secret.
+	IDTokenSigningKey string
 }
 
 // CollectionPreset is the minimal Go config struct for milestone 1
@@ -68,6 +118,8 @@ type Config struct {
 	CustomTools    []ToolSpec
 	Policies       map[string]PolicyFunc
 	BaseURL        string // optional public base URL for record URLs
+	PublicURL      string // synonym for the public base URL (OAuth issuer / discovery)
+	OAuth          OAuthConfig
 }
 
 // EffectiveManifest returns the normalized manifest (from Manifest or converted presets).

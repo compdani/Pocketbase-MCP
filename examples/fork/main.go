@@ -38,10 +38,13 @@ func loadManifest() *pbmcp.Manifest {
 
 func main() {
 	app := pocketbase.New()
+	publicURL := os.Getenv("MCP_PUBLIC_URL")
 	cfg := pbmcp.Config{
 		Path:        "/mcp",
 		AliasPaths:  []string{"/sse"},
-		Auth:        pbmcp.AuthConfig{Collections: []string{"users"}, AllowSuperusers: false},
+		PublicURL:   publicURL,
+		Auth:        pbmcp.AuthConfig{Collection: "users", AllowSuperusers: false},
+		OAuth:       pbmcp.OAuthConfig{Enabled: true, Mode: pbmcp.OAuthModeNative, PublicBaseURL: publicURL},
 		Manifest:    loadManifest(),
 		AllowWrites: os.Getenv("MCP_ALLOW_WRITES") == "true",
 	}
@@ -61,6 +64,32 @@ func main() {
 		})
 	}
 	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
+		// Enable the fork's native OAuth2Server on the users collection
+		// (fixture setup; the MCP module itself adds no OAuth storage).
+		if os.Getenv("MCP_SEED_NATIVE_OAUTH") != "false" {
+			users, err := se.App.FindCollectionByNameOrId("users")
+			if err != nil {
+				return err
+			}
+			if !users.OAuth2Server.Enabled {
+				redirect := os.Getenv("MCP_OAUTH_REDIRECT_URI")
+				if redirect == "" {
+					redirect = "https://example.com/callback"
+				}
+				secret := os.Getenv("MCP_OAUTH_CLIENT_SECRET")
+				if secret == "" {
+					secret = "dev-oauth-secret-0123456789abcdef"
+				}
+				users.OAuth2Server = core.OAuth2ServerConfig{
+					Enabled: true, CodeDuration: 600,
+					Clients: []core.OAuth2ServerClient{{Id: "chatgpt-dev", Name: "ChatGPT", Secret: secret, RedirectURIs: []string{redirect}}},
+				}
+				if err := se.App.Save(users); err != nil {
+					return err
+				}
+				log.Printf("enabled native OAuth2Server on users (client_id=chatgpt-dev redirect_uri=%s)", redirect)
+			}
+		}
 		srv, err := pb.New(se.App, cfg)
 		if err != nil {
 			return err

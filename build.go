@@ -52,6 +52,9 @@ func isWritableInfo(f FieldInfo) bool {
 
 // BuildCollectionConfig validates one manifest entry against a resolved schema and builds the snapshot config.
 func BuildCollectionConfig(entry ManifestCollection, meta SchemaCollection, resolve TargetResolver) (*CollectionConfig, error) {
+	if strings.HasPrefix(meta.Name, "mcp_oauth_") {
+		return nil, fmt.Errorf("collection %q is private OAuth storage and cannot be exposed", meta.Name)
+	}
 	var errs []string
 	add := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
 	allMap := map[string]FieldInfo{}

@@ -19,11 +19,13 @@ import (
 	"time"
 
 	"github.com/pocketbase/dbx"
-	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
+	"github.com/pocketbase/pocketbase/tools/hook"
 	"github.com/pocketbase/pocketbase/tools/router"
 	"github.com/pocketbase/pocketbase/tools/search"
 	"github.com/pocketbase/pocketbase/tools/types"
+
+	"github.com/compdani/pocketbase-mcp/auth/stockoauth"
 
 	pbmcp "github.com/compdani/pocketbase-mcp"
 )
@@ -45,6 +47,9 @@ type Adapter struct {
 	routerMu sync.Mutex
 	rtr      *router.Router[*core.RequestEvent]
 	handler  http.Handler
+
+	plan     pbmcp.OAuthPlan
+	provider *stockoauth.Provider
 }
 
 // Server wraps the neutral server plus its adapter.
@@ -63,9 +68,30 @@ func New(app core.App, cfg pbmcp.Config) (*Server, error) {
 	if err := manifest.ValidateStructural(cfg.Policies, customNames); err != nil {
 		return nil, err
 	}
+	mount := cfg.Path
+	if mount == "" {
+		mount = "/mcp"
+	}
+	key := fmt.Sprintf("%p|%s", app, mount)
+	if _, loaded := oauthMountGuard.Load(key); cfg.OAuthEnabled() && loaded {
+		return nil, fmt.Errorf("duplicate MCP registration for app and mount %q", mount)
+	}
+	success := false
+	defer func() {
+		if !success {
+			oauthMountGuard.Delete(key)
+		}
+	}()
 	a := &Adapter{app: app, cfg: cfg, configs: map[string]*pbmcp.CollectionConfig{}, stableIDs: map[string]string{}}
 	if err := a.rebuild(); err != nil {
 		return nil, err
+	}
+	if err := a.initOAuth(); err != nil {
+		return nil, err
+	}
+	if a.plan.Enabled && len(cfg.Auth.Collections) == 0 {
+		cfg.Auth.Collections = []string{a.plan.CollectionID}
+		a.cfg = cfg
 	}
 	rebuild := func(e *core.CollectionEvent) error {
 		err := e.Next()
@@ -74,28 +100,41 @@ func New(app core.App, cfg pbmcp.Config) (*Server, error) {
 		}
 		return err
 	}
-	app.OnCollectionAfterCreateSuccess().BindFunc(rebuild)
-	app.OnCollectionAfterUpdateSuccess().BindFunc(rebuild)
-	app.OnCollectionAfterDeleteSuccess().BindFunc(rebuild)
+	app.OnCollectionAfterCreateSuccess().Bind(&hook.Handler[*core.CollectionEvent]{Id: "pbmcp:" + mount + ":schema:create", Func: rebuild})
+	app.OnCollectionAfterUpdateSuccess().Bind(&hook.Handler[*core.CollectionEvent]{Id: "pbmcp:" + mount + ":schema:update", Func: rebuild})
+	app.OnCollectionAfterDeleteSuccess().Bind(&hook.Handler[*core.CollectionEvent]{Id: "pbmcp:" + mount + ":schema:delete", Func: rebuild})
 	srv := pbmcp.New(cfg, a)
+	if cfg.OAuthEnabled() {
+		oauthMountGuard.Store(key, true)
+	}
+	success = true
 	return &Server{Server: srv, Adapter: a}, nil
 }
 
 // RegisterRoutes mounts the MCP endpoint(s) on the PB router. Call during OnServe.
-func (s *Server) RegisterRoutes(r *router.Router[*core.RequestEvent]) {
+func (s *Server) RegisterRoutes(r *router.Router[*core.RequestEvent]) error {
+	if err := s.Adapter.registerOAuthRoutes(r); err != nil {
+		return err
+	}
 	s.Adapter.setRouter(r)
 	for _, p := range s.Paths() {
 		for _, path := range []string{p, p + "/"} {
-			r.POST(path, s.handle).Bind(apis.RequireAuth())
-			r.GET(path, s.handle).Bind(apis.RequireAuth())
-			r.DELETE(path, s.handle).Bind(apis.RequireAuth())
+			r.POST(path, s.handle)
+			r.GET(path, s.handle)
+			r.DELETE(path, s.handle)
 		}
 	}
+	return nil
 }
 
 func (s *Server) handle(e *core.RequestEvent) error {
 	if e.Auth == nil {
-		return apis.NewUnauthorizedError("Unauthorized", nil)
+		cfg := s.Config()
+		if cfg.OAuthEnabled() {
+			base := cfg.PublicBaseFor(e.Request)
+			e.Response.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+base+pbmcp.ProtectedResourcePath(cfg.Path)+`"`)
+		}
+		return e.JSON(http.StatusUnauthorized, map[string]any{"message": "Unauthorized"})
 	}
 	p := principalFromRecord(e.Auth)
 	p.Token = callerToken(e.Request)

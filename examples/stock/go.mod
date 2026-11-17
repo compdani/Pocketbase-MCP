@@ -3,13 +3,14 @@ module example/stock
 go 1.27
 
 require (
-	github.com/pocketbase/pocketbase v0.40.1
 	github.com/compdani/pocketbase-mcp v0.0.0
 	github.com/compdani/pocketbase-mcp/adapters/pocketbase v0.0.0
+	github.com/pocketbase/pocketbase v0.40.1
 )
 
 require (
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
+	github.com/compdani/pocketbase-mcp/auth/stockoauth v0.0.0 // indirect
 	github.com/disintegration/imaging v1.6.2 // indirect
 	github.com/domodwyer/mailyak/v3 v3.6.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -45,3 +46,5 @@ require (
 replace github.com/compdani/pocketbase-mcp => ../../
 
 replace github.com/compdani/pocketbase-mcp/adapters/pocketbase => ../../adapters/pocketbase
+
+replace github.com/compdani/pocketbase-mcp/auth/stockoauth => ../../auth/stockoauth

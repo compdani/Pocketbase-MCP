@@ -1,0 +1,3 @@
+package main
+import("log"; "github.com/pocketbase/pocketbase"; "github.com/pocketbase/pocketbase/core")
+func main(){app:=pocketbase.NewWithConfig(pocketbase.Config{DefaultDataDir:"/tmp/mcp3stock"});if err:=app.Bootstrap();err!=nil{log.Fatal(err)};defer app.ResetBootstrapState();users,_:=app.FindCollectionByNameOrId("users");r:=core.NewRecord(users);r.SetEmail("user@example.com");r.SetPassword("password123");if err:=app.Save(r);err!=nil{log.Fatal(err)};c:=core.NewBaseCollection("items");rule:="";c.ListRule=&rule;c.ViewRule=&rule;c.Fields.Add(&core.TextField{Name:"title"},&core.TextField{Name:"status"});if err:=app.Save(c);err!=nil{log.Fatal(err)}}

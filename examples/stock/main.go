@@ -2,6 +2,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -38,10 +40,13 @@ func loadManifest() *pbmcp.Manifest {
 
 func main() {
 	app := pocketbase.New()
+	publicURL := os.Getenv("MCP_PUBLIC_URL")
 	cfg := pbmcp.Config{
 		Path:        "/mcp",
 		AliasPaths:  []string{"/sse"},
-		Auth:        pbmcp.AuthConfig{Collections: []string{"users"}, AllowSuperusers: false},
+		PublicURL:   publicURL,
+		Auth:        pbmcp.AuthConfig{Collection: "users", AllowSuperusers: false},
+		OAuth:       pbmcp.OAuthConfig{Enabled: true, Mode: pbmcp.OAuthModeModule, PublicBaseURL: publicURL},
 		Manifest:    loadManifest(),
 		AllowWrites: os.Getenv("MCP_ALLOW_WRITES") == "true",
 	}
@@ -65,7 +70,32 @@ func main() {
 		if err != nil {
 			return err
 		}
-		srv.RegisterRoutes(se.Router)
+		if err := srv.RegisterRoutes(se.Router); err != nil {
+			return err
+		}
+		// Seed a hand-created confidential client (ChatGPT baseline). The
+		// secret is printed once, only when the client is first created.
+		if os.Getenv("MCP_SEED_OAUTH_CLIENT") != "false" {
+			if prov := srv.Adapter.Provider(); prov != nil {
+				name := "ChatGPT"
+				if _, err := se.App.FindFirstRecordByData(prov.Config().ClientsCollection(), "name", name); err != nil {
+					redirect := os.Getenv("MCP_OAUTH_REDIRECT_URI")
+					if redirect == "" {
+						redirect = "https://example.com/callback"
+					}
+					id, secret, err := prov.CreateHandClient(name, []string{redirect})
+					if err != nil {
+						return err
+					}
+					credentials, _ := json.Marshal(map[string]string{"client_id": id, "client_secret": secret, "redirect_uri": redirect})
+					path := filepath.Join(se.App.DataDir(), "mcp-client.json")
+					if err := os.WriteFile(path, credentials, 0600); err != nil {
+						return fmt.Errorf("write seed credentials: %w", err)
+					}
+					log.Printf("seeded OAuth client; credentials saved to %s (protect and remove after setup)", path)
+				}
+			}
+		}
 		return se.Next()
 	})
 	if err := app.Start(); err != nil {

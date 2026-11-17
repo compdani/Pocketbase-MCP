@@ -109,10 +109,12 @@ func (s *Server) acceptPrincipal(p Principal) bool {
 	if p.IsSuperuser || p.CollectionName == "_superusers" {
 		return s.cfg.Auth.AllowSuperusers
 	}
-	if len(s.cfg.Auth.Collections) == 0 {
+	accepted := s.cfg.EffectiveAuthCollections()
+	if len(accepted) == 0 {
 		return false // fail closed: accepted collections must be explicit
 	}
-	return slices.Contains(s.cfg.Auth.Collections, p.CollectionName)
+	// Accept by collection name or stable ID.
+	return slices.Contains(accepted, p.CollectionName) || (p.CollectionID != "" && slices.Contains(accepted, p.CollectionID))
 }
 
 func extractToken(r *http.Request) string {
@@ -128,12 +130,12 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := extractToken(r)
 		if token == "" {
-			writePlainError(w, http.StatusUnauthorized, "Unauthorized")
+			s.writeUnauthorized(w, r)
 			return
 		}
 		p, err := s.host.Authenticate(token)
 		if err != nil {
-			writePlainError(w, http.StatusUnauthorized, "Unauthorized")
+			s.writeUnauthorized(w, r)
 			return
 		}
 		p.Token = token
@@ -145,7 +147,7 @@ func (s *Server) Handler() http.Handler {
 // (used by PocketBase adapters where e.Auth is already resolved).
 func (s *Server) ServeWithPrincipal(w http.ResponseWriter, r *http.Request, p Principal) {
 	if !s.acceptPrincipal(p) {
-		writePlainError(w, http.StatusUnauthorized, "Unauthorized")
+		s.writeUnauthorized(w, r)
 		return
 	}
 	if !s.allowOrigin(r) {

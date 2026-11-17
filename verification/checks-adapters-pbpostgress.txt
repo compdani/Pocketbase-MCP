@@ -1,0 +1,11 @@
+$ go build ./...
+exit 0
+
+$ go vet ./...
+exit 0
+
+$ go test -count=1 ./...
+exit 0
+ok  	github.com/compdani/pocketbase-mcp/adapters/pbpostgress	3.583s
+
+$ gofmt -l <module Go files>

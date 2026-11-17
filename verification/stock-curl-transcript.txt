@@ -1,0 +1,39 @@
+$ curl -i -X GET http://127.0.0.1:18093/.well-known/oauth-authorization-server [sensitive arguments omitted]
+HTTP 200
+
+{"userinfo_endpoint":"http://127.0.0.1:18093/oauth/userinfo","grant_types_supported":["authorization_code"],"scopes_supported":["openid","profile","email"],"token_endpoint_auth_methods_supported":["client_secret_post","client_secret_basic","none"],"code_challenge_methods_supported":["S256"],"registration_endpoint":"http://127.0.0.1:18093/oauth/register","issuer":"http://127.0.0.1:18093","token_endpoint":"http://127.0.0.1:18093/oauth/token","response_types_supported":["code"],"subject_types_supported":["public"],"authorization_endpoint":"http://127.0.0.1:18093/oauth/login"}
+
+ChatGPT hand-created confidential client; S256=False
+$ curl -i -X GET http://127.0.0.1:18093/oauth/login [sensitive arguments omitted]
+HTTP 200
+
+$ curl -i -X POST http://127.0.0.1:18093/oauth/login [sensitive arguments omitted]
+HTTP 302
+
+$ curl -i -X POST http://127.0.0.1:18093/oauth/token [sensitive arguments omitted]
+HTTP 200
+
+PB bearer token returned (redacted).
+$ curl -i -X POST http://127.0.0.1:18093/mcp [sensitive arguments omitted]
+HTTP 200
+
+{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"describe_access","title":"Describe access","description":"List caller-visible collections, per-operation availability, limits and the manifest revision.","inputSchema":{"additionalProperties":false,"properties":{},"type":"object"},"annotations":{"title":"Describe access","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},{"name":"describe_collection","title":"Describe collection","description":"List the available collections, or describe one collection's fields, filters, sort fields and relations.","inputSchema":{"additionalProperties":false,"properties":{"collection":{"description":"Collection to describe. Omit to list all collections.","enum":["items"],"type":"string"}},"type":"object"},"annotations":{"title":"Describe collection","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},{"name":"search_items","title":"Search items","description":"Search or list items records by free text and field filters. Returns summaries with paging info; use fetch_items for full records.","inputSchema":{"additionalProperties":false,"properties":{"limit":{"default":20,"description":"Results per page.","maximum":50,"minimum":1,"type":"integer"},"page":{"default":1,"description":"1-based page number.","minimum":1,"type":"integer"},"query":{"description":"Case-insensitive text matched against: title. Omit to list records.","type":"string"},"sort":{"description":"Comma-separated sort fields, prefix with - for descending. Allowed: title, id. Default: title.","type":"string"},"status":{"description":"status contains this text.","type":"string"},"title":{"description":"title contains this text.","type":"string"}},"type":"object"},"outputSchema":{"properties":{"collection":{"type":"string"},"hasMore":{"type":"boolean"},"page":{"type":"integer"},"perPage":{"type":"integer"},"results":{"items":{"properties":{"collection":{"type":"string"},"fields":{"type":"object"},"id":{"type":"string"},"related":{"type":"object"},"title":{"type":"string"},"updated":{"type":"string"},"url":{"type":"string"}},"required":["id","collection","title"],"type":"object"},"type":"array"},"totalItems":{"type":"integer"},"totalPages":{"type":"integer"}},"required":["results","page","perPage","hasMore"],"type":"object"},"annotations":{"title":"Search items","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},{"name":"fetch_items","title":"Fetch items","description":"Fetch one full items record by id.","inputSchema":{"additionalProperties":false,"properties":{"id":{"description":"Record id.","type":"string"}},"required":["id"],"type":"object"},"outputSchema":{"properties":{"collection":{"type":"string"},"id":{"type":"string"},"record":{"type":"object"},"title":{"type":"string"},"url":{"type":"string"}},"required":["id","collection","title","record"],"type":"object"},"annotations":{"title":"Fetch items","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}]}}
+
+
+ChatGPT hand-created confidential client; S256=True
+$ curl -i -X GET http://127.0.0.1:18093/oauth/login [sensitive arguments omitted]
+HTTP 200
+
+$ curl -i -X POST http://127.0.0.1:18093/oauth/login [sensitive arguments omitted]
+HTTP 302
+
+$ curl -i -X POST http://127.0.0.1:18093/oauth/token [sensitive arguments omitted]
+HTTP 200
+
+PB bearer token returned (redacted).
+$ curl -i -X POST http://127.0.0.1:18093/mcp [sensitive arguments omitted]
+HTTP 200
+
+{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"describe_access","title":"Describe access","description":"List caller-visible collections, per-operation availability, limits and the manifest revision.","inputSchema":{"additionalProperties":false,"properties":{},"type":"object"},"annotations":{"title":"Describe access","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},{"name":"describe_collection","title":"Describe collection","description":"List the available collections, or describe one collection's fields, filters, sort fields and relations.","inputSchema":{"additionalProperties":false,"properties":{"collection":{"description":"Collection to describe. Omit to list all collections.","enum":["items"],"type":"string"}},"type":"object"},"annotations":{"title":"Describe collection","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},{"name":"search_items","title":"Search items","description":"Search or list items records by free text and field filters. Returns summaries with paging info; use fetch_items for full records.","inputSchema":{"additionalProperties":false,"properties":{"limit":{"default":20,"description":"Results per page.","maximum":50,"minimum":1,"type":"integer"},"page":{"default":1,"description":"1-based page number.","minimum":1,"type":"integer"},"query":{"description":"Case-insensitive text matched against: title. Omit to list records.","type":"string"},"sort":{"description":"Comma-separated sort fields, prefix with - for descending. Allowed: title, id. Default: title.","type":"string"},"status":{"description":"status contains this text.","type":"string"},"title":{"description":"title contains this text.","type":"string"}},"type":"object"},"outputSchema":{"properties":{"collection":{"type":"string"},"hasMore":{"type":"boolean"},"page":{"type":"integer"},"perPage":{"type":"integer"},"results":{"items":{"properties":{"collection":{"type":"string"},"fields":{"type":"object"},"id":{"type":"string"},"related":{"type":"object"},"title":{"type":"string"},"updated":{"type":"string"},"url":{"type":"string"}},"required":["id","collection","title"],"type":"object"},"type":"array"},"totalItems":{"type":"integer"},"totalPages":{"type":"integer"}},"required":["results","page","perPage","hasMore"],"type":"object"},"annotations":{"title":"Search items","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},{"name":"fetch_items","title":"Fetch items","description":"Fetch one full items record by id.","inputSchema":{"additionalProperties":false,"properties":{"id":{"description":"Record id.","type":"string"}},"required":["id"],"type":"object"},"outputSchema":{"properties":{"collection":{"type":"string"},"id":{"type":"string"},"record":{"type":"object"},"title":{"type":"string"},"url":{"type":"string"}},"required":["id","collection","title","record"],"type":"object"},"annotations":{"title":"Fetch items","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}]}}
+
+PASS: both flows
