@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ChatController, accountKeyOf, resolveChoice } from '../controller.mjs';
+import { ChatController, accountKeyOf, attachmentTypesFor, resolveChoice } from '../controller.mjs';
 import { ChatApiError, ChatNetworkError, ResyncRequiredError } from '../client.mjs';
 import { GapError } from '../reducer.mjs';
 import {
@@ -1043,4 +1043,42 @@ test('an account switch clears proposals and pending uploads', async () => {
   assert.deepEqual(controller.state.pendingUploads, []);
   assert.deepEqual(controller.state.transcript, []);
   await switching;
+});
+
+test('attachmentTypesFor prefers the choice list over the union', () => {
+  const limits = { attachmentTypes: ['text/plain', 'image/png'] };
+  assert.deepEqual(attachmentTypesFor(limits), ['text/plain', 'image/png']);
+  assert.deepEqual(attachmentTypesFor(limits, { id: 'a::m', attachmentTypes: ['text/plain'] }), ['text/plain']);
+  assert.deepEqual(attachmentTypesFor(limits, { id: 'a::m' }), ['text/plain', 'image/png']);
+  assert.equal(attachmentTypesFor(null), null);
+});
+
+test('attach checks the union, or the named model; send checks the model it sends to', async () => {
+  const client = uploadLimitsClient();
+  client.statusResult = {
+    ...client.statusResult,
+    choices: [
+      { id: 'a::m1', provider: 'a', model: 'm1', default: true, attachmentTypes: ['text/plain'] },
+      { id: 'b::m2', provider: 'b', model: 'm2', attachmentTypes: ['text/plain', 'image/png'] },
+    ],
+    defaultChoice: 'a::m1',
+  };
+  client.detailResult = detail(conversation('c1'), []);
+  const controller = new ChatController({ client });
+  await controller.init();
+  await controller.open('c1');
+
+  const png = () => new Blob(['x'], { type: 'image/png' });
+  // The union accepts a PNG even though the default model can't read it.
+  assert.equal((await controller.attach([png()])).length, 1);
+  controller.clearAttachments();
+  await assert.rejects(
+    controller.attach([png()], { model: 'a::m1' }),
+    (err) => err instanceof ChatApiError && err.code === 'unsupported_media',
+  );
+  await assert.rejects(
+    controller.send('look', { model: 'a::m1', attachments: [png()] }),
+    (err) => err instanceof ChatApiError && err.code === 'unsupported_media',
+  );
+  assert.equal((await controller.attach([png()], { model: 'b::m2' })).length, 1);
 });
