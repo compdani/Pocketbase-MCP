@@ -158,6 +158,7 @@ func (g *gatedProvider) Stream(ctx context.Context, _ provider.Request) (<-chan 
 type fixtureOptions struct {
 	steps       []scripted.Step
 	provider    provider.Provider
+	router      ModelRouter
 	models      []string
 	maxEvents   int
 	maxBody     int64
@@ -194,13 +195,15 @@ func newFixture(t *testing.T, opts fixtureOptions) *apiFixture {
 		prov       provider.Provider
 		scriptedPr *scripted.Provider
 	)
-	if opts.provider != nil {
-		prov = opts.provider
-	} else {
-		scriptedPr = scripted.New(opts.steps...)
-		prov = scriptedPr
+	if opts.router == nil {
+		if opts.provider != nil {
+			prov = opts.provider
+		} else {
+			scriptedPr = scripted.New(opts.steps...)
+			prov = scriptedPr
+		}
 	}
-	runnerCfg := RunnerConfig{Store: store, Provider: prov, Model: "model-a"}
+	runnerCfg := RunnerConfig{Store: store, Provider: prov, Model: "model-a", Router: opts.router}
 	var proposals ProposalStore
 	if opts.proposals {
 		runnerCfg.Proposals = store
@@ -222,6 +225,7 @@ func newFixture(t *testing.T, opts fixtureOptions) *apiFixture {
 		Runner:                    runner,
 		Store:                     store,
 		Auth:                      auth,
+		Router:                    opts.router,
 		Models:                    models,
 		MaxBodyBytes:              opts.maxBody,
 		MaxMessageChars:           opts.maxChars,

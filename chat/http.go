@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/compdani/pocketbase-mcp/chat/provider"
 )
 
 // Wire error codes. They are part of the contract: a client branches on the
@@ -135,8 +137,12 @@ type HandlerConfig struct {
 	Store Store
 	// Auth authenticates every request.
 	Auth Authenticator
+	// Router, when set, supplies the model choices and resolves a turn's
+	// provider and model. Nil keeps the runner's legacy single-provider path.
+	Router ModelRouter
 	// Models is the allowlist reported by /status. A turn may only select one
-	// of these models; the list is informational otherwise in v1.1.
+	// of these models; the list is informational otherwise in v1.1. With a
+	// Router, an empty list is derived from the router's choices.
 	Models []string
 	// MaxBodyBytes bounds a JSON request body. Zero means 64 KiB.
 	MaxBodyBytes int64
@@ -180,6 +186,14 @@ type HandlerConfig struct {
 	// MaxUploadsPerConversation bounds how many uploads one conversation may
 	// keep. Zero means 50.
 	MaxUploadsPerConversation int
+	// ProviderAdmin, when set together with AdminAuth, mounts the superuser
+	// provider management routes under the chat prefix. It never widens the
+	// normal chat surface.
+	ProviderAdmin ProviderAdmin
+	// AdminAuth authenticates the provider admin routes. It must be a
+	// superuser-only authenticator; the chat auth and policy are not applied to
+	// these routes.
+	AdminAuth Authenticator
 }
 
 // NewHandler validates cfg and returns the chat HTTP handler.
@@ -192,6 +206,9 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 	}
 	if cfg.Auth == nil {
 		return nil, errors.New("chat: handler requires an authenticator")
+	}
+	if cfg.ProviderAdmin != nil && cfg.AdminAuth == nil {
+		return nil, errors.New("chat: provider admin requires an admin authenticator")
 	}
 	prefix, err := validatePrefix(cfg.Prefix)
 	if err != nil {
@@ -286,7 +303,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	caller, err := h.cfg.Auth.Authenticate(r)
+	// Provider admin routes get their own authenticator. A superuser may be
+	// rejected by the user-facing chat gate (Auth.AllowSuperusers off) and still
+	// have to reach the settings surface, and the chat policy must not apply
+	// there.
+	auth := h.cfg.Auth
+	if h.providerAdminPath(r.URL.Path) {
+		auth = h.cfg.AdminAuth
+	}
+	caller, err := auth.Authenticate(r)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrUnauthorized):
@@ -310,6 +335,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx := context.WithValue(r.Context(), callerContextKey{}, caller)
 	h.mux.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// providerAdminPath reports whether path belongs to the provider admin
+// surface. It is only consulted when that surface is mounted, so an ordinary
+// chat path is never routed to a nil AdminAuth.
+func (h *handler) providerAdminPath(p string) bool {
+	if h.cfg.ProviderAdmin == nil {
+		return false
+	}
+	base := h.cfg.Prefix + "/providers"
+	return p == base || strings.HasPrefix(p, base+"/")
 }
 
 // hasTokenQuery reports whether a credential was smuggled into the URL. Tokens
@@ -365,12 +401,38 @@ func (h *handler) routes() *http.ServeMux {
 			route{http.MethodGet, p + "/uploads/{id}/meta", h.uploadMeta},
 		)
 	}
+	if h.cfg.ProviderAdmin != nil {
+		// Superuser-only provider management. AdminAuth gates these paths in
+		// ServeHTTP before the normal chat authenticator runs.
+		table = append(table,
+			route{http.MethodGet, p + "/providers", h.listProviders},
+			route{http.MethodPost, p + "/providers", h.createProvider},
+			// Two-segment action paths never collide with /providers/{id}.
+			route{http.MethodPost, p + "/providers/actions/test", h.testProviderConfig},
+			route{http.MethodPost, p + "/providers/actions/default", h.setDefaultProvider},
+			route{http.MethodGet, p + "/providers/{id}", h.getProvider},
+			route{http.MethodPatch, p + "/providers/{id}", h.updateProvider},
+			route{http.MethodDelete, p + "/providers/{id}", h.deleteProvider},
+			route{http.MethodPost, p + "/providers/{id}/test", h.testProvider},
+			route{http.MethodPost, p + "/providers/{id}/models/refresh", h.refreshProviderModels},
+			route{http.MethodPost, p + "/providers/{id}/signin", h.beginProviderSignIn},
+			route{http.MethodPost, p + "/providers/{id}/signin/complete", h.completeProviderSignIn},
+			route{http.MethodPost, p + "/providers/{id}/signin/cancel", h.cancelProviderSignIn},
+			route{http.MethodPost, p + "/providers/{id}/signout", h.signOutProvider},
+			route{http.MethodPost, p + "/providers/{id}/import", h.importProviderCredentials},
+		)
+	}
 
 	mux := http.NewServeMux()
 	byPath := make(map[string][]string, len(table))
 	var order []string
 	for _, rt := range table {
 		mux.HandleFunc(rt.method+" "+rt.path, rt.fn)
+		// Admin routes skip the method-less 405 pattern: a literal action path
+		// and a wildcard route can otherwise be ambiguous to ServeMux.
+		if strings.HasPrefix(rt.path, p+"/providers") {
+			continue
+		}
 		if _, ok := byPath[rt.path]; !ok {
 			order = append(order, rt.path)
 		}
@@ -667,10 +729,14 @@ type limitsView struct {
 }
 
 type statusView struct {
-	Version  string       `json:"version"`
-	Models   []string     `json:"models"`
-	Features featuresView `json:"features"`
-	Limits   limitsView   `json:"limits"`
+	Version string   `json:"version"`
+	Models  []string `json:"models"`
+	// Choices and DefaultChoice are present when a model router is configured.
+	// Models stays a flat de-duplicated list for older clients.
+	Choices       []ModelChoice `json:"choices,omitempty"`
+	DefaultChoice string        `json:"defaultChoice,omitempty"`
+	Features      featuresView  `json:"features"`
+	Limits        limitsView    `json:"limits"`
 }
 
 type conversationListView struct {
@@ -713,6 +779,7 @@ type renameConversationRequest struct {
 
 type submitTurnRequest struct {
 	Text        *string  `json:"text"`
+	Provider    *string  `json:"provider"`
 	Model       *string  `json:"model"`
 	Attachments []string `json:"attachments"`
 }
@@ -932,7 +999,7 @@ func isAttrChar(c byte) bool {
 // be the caller's upload in this conversation, and its type must be one the
 // provider can send. A missing, foreign or duplicated id is the same 400, so a
 // caller cannot probe for uploads they do not own.
-func (h *handler) turnAttachments(w http.ResponseWriter, r *http.Request, caller Caller, conversationID string, ids []string) ([]Upload, bool) {
+func (h *handler) turnAttachments(w http.ResponseWriter, r *http.Request, caller Caller, conversationID string, ids []string, target *ResolvedModel) ([]Upload, bool) {
 	if h.cfg.Uploads == nil {
 		h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
 		return nil, false
@@ -962,9 +1029,16 @@ func (h *handler) turnAttachments(w http.ResponseWriter, r *http.Request, caller
 		out = append(out, upload)
 	}
 	// Support is checked only after every reference resolved, so an invalid id
-	// is never distinguishable from an unsupported one.
+	// is never distinguishable from an unsupported one. A resolved target is
+	// checked against that provider; otherwise the runner's configured provider
+	// (or the catalog union) answers.
 	for _, upload := range out {
-		if !h.cfg.Runner.SupportsAttachment(upload.MIME) {
+		supported := h.cfg.Runner.SupportsAttachment(upload.MIME)
+		if target != nil {
+			support, ok := target.Provider.(provider.AttachmentSupport)
+			supported = ok && support.SupportsAttachment(upload.MIME)
+		}
+		if !supported {
 			h.writeError(w, http.StatusBadRequest, CodeUnsupportedAttachment, msgUnsupportedAttach)
 			return nil, false
 		}
@@ -979,22 +1053,61 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	models := append([]string{}, h.cfg.Models...)
+	var choices []ModelChoice
+	defaultChoice := ModelChoice{}
+	if h.cfg.Router != nil {
+		var err error
+		choices, err = h.cfg.Router.Choices(r.Context())
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, CodeInternal, msgInternal)
+			return
+		}
+		defaultChoice, _ = h.cfg.Router.Default(r.Context())
+		for i := range choices {
+			choices[i].Default = choices[i].ID == defaultChoice.ID
+		}
+		if len(models) == 0 {
+			models = modelIDs(choices)
+		}
+	}
 	limits := limitsView{MaxMessageChars: h.cfg.MaxMessageChars}
 	if h.cfg.Uploads != nil {
 		limits.MaxUploadBytes = h.cfg.MaxUploadBytes
 		limits.MaxAttachmentsPerTurn = h.cfg.MaxAttachmentsPerTurn
 		types := attachmentTypesFor(h.cfg.Runner.SupportsAttachment)
+		if defaultChoice.ID != "" && defaultChoice.AttachmentTypes != nil {
+			types = append([]string{}, defaultChoice.AttachmentTypes...)
+		}
 		limits.AttachmentTypes = &types
 	}
 	h.writeJSON(w, http.StatusOK, statusView{
-		Version: ProtocolVersion,
-		Models:  models,
+		Version:       ProtocolVersion,
+		Models:        models,
+		Choices:       choices,
+		DefaultChoice: defaultChoice.ID,
 		Features: featuresView{
 			Proposals: h.cfg.Proposals != nil,
 			Uploads:   h.cfg.Uploads != nil,
 		},
 		Limits: limits,
 	})
+}
+
+// modelIDs flattens choices into the legacy de-duplicated model list.
+func modelIDs(choices []ModelChoice) []string {
+	out := make([]string, 0, len(choices))
+	seen := make(map[string]struct{}, len(choices))
+	for _, choice := range choices {
+		if choice.Model == "" {
+			continue
+		}
+		if _, ok := seen[choice.Model]; ok {
+			continue
+		}
+		seen[choice.Model] = struct{}{}
+		out = append(out, choice.Model)
+	}
+	return out
 }
 
 func (h *handler) listConversations(w http.ResponseWriter, r *http.Request) {
@@ -1219,20 +1332,56 @@ func (h *handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
 		return
 	}
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	// Return a previously created turn before resolving a provider or
+	// validating attachments. A retry after a lost response must not fail
+	// because the catalog changed in the meantime.
+	if idempotencyKey != "" {
+		if finder, ok := h.cfg.Store.(IdempotentTurnStore); ok {
+			turn, found, err := finder.FindTurnByIdempotencyKey(r.Context(), caller.Owner, conv.ID, idempotencyKey)
+			if err != nil {
+				h.storeError(w, err)
+				return
+			}
+			if found {
+				h.writeJSON(w, http.StatusAccepted, submitTurnView{Turn: turn, Created: false})
+				return
+			}
+		}
+	}
+	provider := ""
+	if req.Provider != nil {
+		provider = strings.TrimSpace(*req.Provider)
+	}
 	model := ""
 	if req.Model != nil {
 		model = strings.TrimSpace(*req.Model)
+	}
+
+	var target *ResolvedModel
+	if h.cfg.Router != nil {
+		resolved, err := h.cfg.Router.Resolve(r.Context(), provider, model)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
+			return
+		}
+		target = &resolved
+		provider = resolved.Choice.Provider
+		model = resolved.Model
+	} else {
+		if provider != "" {
+			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
+			return
+		}
 		if model != "" && !h.modelAllowed(model) {
 			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
 			return
 		}
 	}
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-
 	var attachments []Upload
 	if len(req.Attachments) > 0 {
 		var ok bool
-		attachments, ok = h.turnAttachments(w, r, caller, conv.ID, req.Attachments)
+		attachments, ok = h.turnAttachments(w, r, caller, conv.ID, req.Attachments, target)
 		if !ok {
 			return
 		}
@@ -1246,11 +1395,17 @@ func (h *handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 		Text:           text,
 		Attachments:    attachments,
 		IdempotencyKey: idempotencyKey,
+		Provider:       provider,
 		Model:          model,
+		Target:         target,
 		Tools:          caller.Tools,
 		Deadline:       caller.Expires,
 	})
 	if err != nil {
+		if errors.Is(err, ErrModelUnknown) || errors.Is(err, ErrModelAmbiguous) || errors.Is(err, ErrNoModelConfigured) {
+			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
+			return
+		}
 		h.storeError(w, err)
 		return
 	}

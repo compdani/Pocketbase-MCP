@@ -65,6 +65,8 @@ type chatEnvOptions struct {
 	// a test can address the seeded records from a tool call. Called once,
 	// before EnableChat.
 	steps func(env *chatEnv) []scripted.Step
+	// enable replaces the default legacy EnableChat call, for catalog tests.
+	enable func(*Server) error
 }
 
 func fixedSteps(steps ...scripted.Step) func(*chatEnv) []scripted.Step {
@@ -192,18 +194,24 @@ func newChatEnv(t *testing.T, opts chatEnvOptions) *chatEnv {
 	env.srv = srv
 
 	if !opts.noEnable {
-		var steps []scripted.Step
-		if opts.steps != nil {
-			steps = opts.steps(env)
-		}
-		env.provider = scripted.New(steps...)
-		if err := srv.EnableChat(ChatConfig{
-			Options:  pbmcp.ChatOptions{Namespace: "chat-tests", Prefix: chatTestPrefix, Proposals: opts.proposals, Uploads: opts.uploads},
-			Provider: env.provider,
-			Model:    "scripted-model",
-			System:   "You are a test model.",
-		}); err != nil {
-			t.Fatalf("EnableChat: %v", err)
+		if opts.enable != nil {
+			if err := opts.enable(srv); err != nil {
+				t.Fatalf("EnableChat: %v", err)
+			}
+		} else {
+			var steps []scripted.Step
+			if opts.steps != nil {
+				steps = opts.steps(env)
+			}
+			env.provider = scripted.New(steps...)
+			if err := srv.EnableChat(ChatConfig{
+				Options:  pbmcp.ChatOptions{Namespace: "chat-tests", Prefix: chatTestPrefix, Proposals: opts.proposals, Uploads: opts.uploads},
+				Provider: env.provider,
+				Model:    "scripted-model",
+				System:   "You are a test model.",
+			}); err != nil {
+				t.Fatalf("EnableChat: %v", err)
+			}
 		}
 		store, ok := srv.ChatStorage()
 		if !ok {

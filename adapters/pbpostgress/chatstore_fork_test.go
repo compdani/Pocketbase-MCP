@@ -727,7 +727,7 @@ func TestChatStoreProposalUpgradeFromFourCollections(t *testing.T) {
 	}
 	specs := legacy.specs()
 	for _, spec := range specs[:4] {
-		if err := provisionChatCollection(app, spec); err != nil {
+		if _, err := provisionChatCollection(app, spec); err != nil {
 			t.Fatalf("provision v1.1 collection: %v", err)
 		}
 	}

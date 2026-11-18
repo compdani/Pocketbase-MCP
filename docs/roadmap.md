@@ -2,14 +2,21 @@
 
 Status on 2026-11-18. Done, and covered by tests: the MCP server (milestones
 1–5), chat v1.1 (read-only) and chat v1.2 (proposals, editor tools, uploads).
-Chat v1.1 and v1.2 are not committed yet.
+Chat v1.1 and v1.2 are not committed yet. Chat v1.3 (provider catalog, OpenAI
+Responses, ChatGPT/Codex plan sign-in) is implemented and has had one review
+pass. It still needs staging and a real Codex sign-in.
 
 Suggested order: commit and browser check → staging tests → hardening →
 migrations.
 
 ## Next
 
-- **Commit chat v1.1 + v1.2.**
+- **Staging-test chat v1.3.** Add a real provider, sign in Codex on a
+  staging copy, and run a tool-using turn with an attachment.
+- **Decide whether a changed provider host requires the key again.** Today a
+  saved key follows the entry's `baseURL`. See the review note in
+  [chat-providers-plan.md](chat-providers-plan.md).
+- **Commit chat v1.1 + v1.2 + v1.3.**
 - **Try the chat examples in a real browser.** So far they were checked with
   Node scripts, `curl`, Vite builds and serving their index page. Sign in and
   chat once by hand. Nuxt is described in the Vue README but untested.
@@ -54,6 +61,10 @@ verified. The current assistants in those apps stay as they are until then.
 
 Chat:
 
+- **Provider settings UI.** The superuser provider API is implemented; the
+  plain example does not yet ship a settings panel.
+- **Live Codex sign-in.** The OAuth flow is covered by a mock authorization
+  server; it still needs a real ChatGPT plan sign-in on staging.
 - **Upload count limit is approximate.** The per-conversation limit is
   checked before a file is saved, so simultaneous uploads can go slightly
   over. The per-message limit is exact.

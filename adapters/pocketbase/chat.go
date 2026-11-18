@@ -23,6 +23,7 @@ import (
 	pbmcp "github.com/compdani/pocketbase-mcp"
 	"github.com/compdani/pocketbase-mcp/chat"
 	"github.com/compdani/pocketbase-mcp/chat/provider"
+	"github.com/compdani/pocketbase-mcp/chat/provider/catalog"
 )
 
 // chatShutdownTimeout bounds how long process termination waits for running
@@ -38,16 +39,27 @@ const chatShutdownTimeout = 5 * time.Second
 // how a host plugs in a custom store or a runner it manages itself.
 type ChatConfig struct {
 	Options pbmcp.ChatOptions
-	// Provider executes model requests. Required.
+	// Provider is the legacy single provider. It is required only when no
+	// catalog mode is configured and no custom Runner is supplied.
 	Provider provider.Provider
-	// Model is the model recorded on turns and sent with provider requests,
-	// and the default /status model.
+	// Model is the legacy default model. Ignored in catalog modes.
 	Model string
 	// System is the system prompt sent with every provider request.
 	System string
+	// Providers is a static catalog used when ManageProviders is false. It is
+	// also the first-boot seed when ManageProviders is true and the database
+	// has no provider rows yet.
+	Providers []catalog.Provider
+	// ManageProviders provisions the private provider collections, loads the
+	// catalog from them, and mounts the superuser provider-admin routes.
+	ManageProviders bool
+	// ProviderStore overrides the adapter's provider store. It is responsible
+	// for its own collections when supplied.
+	ProviderStore catalog.Store
 	// RunnerConfig supplies optional runner limits (steps, timeout, worker
 	// bounds, history). Its Store, Provider, Model and System fields are
-	// overridden by this config.
+	// overridden by this config. A custom Options.Runner that resolves a
+	// catalog must also receive Options.Router; the adapter cannot infer it.
 	RunnerConfig chat.RunnerConfig
 	// CollectionPrefix namespaces the private chat collections. Empty means
 	// pocketbase.DefaultChatCollectionPrefix.
@@ -65,6 +77,7 @@ type chatMount struct {
 	handler http.Handler
 	runner  *chat.Runner
 	store   chat.Store
+	router  *catalog.Router
 	// stopSweep cancels the proposal expiry sweep; sweepDone closes once the
 	// sweep goroutine has exited, so shutdown can wait for it.
 	stopSweep context.CancelFunc
@@ -91,9 +104,6 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 	if s.chat != nil {
 		return errors.New("pocketbase: chat is already enabled for this server")
 	}
-	if cfg.Provider == nil {
-		return errors.New("pocketbase: chat requires a provider")
-	}
 	mountPath := s.Config().Path
 	if mountPath == "" {
 		mountPath = "/mcp"
@@ -104,6 +114,20 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 		prefix = pbmcp.DefaultChatPrefix
 	}
 	opts.Prefix = prefix
+
+	catalogMode := cfg.ManageProviders || len(cfg.Providers) > 0
+	if opts.Runner != nil && catalogMode {
+		return errors.New("pocketbase: a custom chat runner cannot be combined with a provider catalog")
+	}
+	if cfg.Provider != nil && catalogMode {
+		return errors.New("pocketbase: set either Provider or Providers/ManageProviders, not both")
+	}
+	if opts.Runner == nil && !catalogMode && cfg.Provider == nil {
+		return errors.New("pocketbase: chat requires a provider, a provider catalog, or a custom runner")
+	}
+	if catalogMode && strings.TrimSpace(opts.Namespace) == "" {
+		return errors.New("pocketbase: a provider catalog requires a chat namespace")
+	}
 
 	store := opts.Store
 	if store == nil {
@@ -133,11 +157,68 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 		}
 	}
 
+	var (
+		router        *catalog.Router
+		providerAdmin chat.ProviderAdmin
+		adminAuth     chat.Authenticator
+	)
+	if catalogMode {
+		scope := catalog.Scope{Namespace: opts.Namespace, Mount: mountPath}
+		providerStore := cfg.ProviderStore
+		if providerStore == nil && cfg.ManageProviders {
+			built, err := NewProviderStore(s.Adapter.app, ProviderStoreOptions{Prefix: cfg.CollectionPrefix, Scope: scope})
+			if err != nil {
+				return fmt.Errorf("pocketbase: provider store: %w", err)
+			}
+			providerStore = built
+		}
+		if cfg.ManageProviders && len(cfg.Providers) > 0 {
+			existing, err := providerStore.ListProviders(context.Background(), scope)
+			if err != nil {
+				return fmt.Errorf("pocketbase: provider seed check: %w", err)
+			}
+			if len(existing) == 0 {
+				for _, p := range cfg.Providers {
+					if err := providerStore.SaveProvider(context.Background(), scope, p); err != nil {
+						return fmt.Errorf("pocketbase: provider seed %q: %w", p.ID, err)
+					}
+				}
+				s.Adapter.app.Logger().Info("MCP chat: seeded providers from config", "providers", len(cfg.Providers))
+			}
+		}
+		built, err := catalog.NewRouter(context.Background(), catalog.RouterOptions{
+			Scope:  scope,
+			Store:  providerStore,
+			Static: staticProviders(cfg),
+			Logger: s.Adapter.app.Logger(),
+		})
+		if err != nil {
+			return fmt.Errorf("pocketbase: provider catalog: %w", err)
+		}
+		router = built
+		if cfg.ManageProviders {
+			admin, err := catalog.NewAdminWithRouter(router, catalog.RouterOptions{
+				Scope:  scope,
+				Store:  providerStore,
+				Logger: s.Adapter.app.Logger(),
+			})
+			if err != nil {
+				router.Close()
+				return fmt.Errorf("pocketbase: provider admin: %w", err)
+			}
+			providerAdmin = admin
+			adminAuth = s.Server.ChatAdminAuthenticator(opts.Namespace)
+		}
+	}
+
 	runner := opts.Runner
 	if runner == nil {
 		cfg.RunnerConfig.Store = store
 		cfg.RunnerConfig.Provider = cfg.Provider
 		cfg.RunnerConfig.Model = cfg.Model
+		if router != nil {
+			cfg.RunnerConfig.Router = router
+		}
 		cfg.RunnerConfig.System = cfg.System
 		if opts.Proposals && cfg.RunnerConfig.Proposals == nil {
 			cfg.RunnerConfig.Proposals = proposals
@@ -166,15 +247,23 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 	}
 	opts.Store = store
 	opts.Runner = runner
-	if len(opts.Models) == 0 && strings.TrimSpace(cfg.Model) != "" {
+	if router != nil {
+		opts.Router = router
+	}
+	opts.ProviderAdmin = providerAdmin
+	opts.AdminAuth = adminAuth
+	if len(opts.Models) == 0 && router == nil && strings.TrimSpace(cfg.Model) != "" {
 		opts.Models = []string{cfg.Model}
 	}
 
 	handler, err := s.Server.ChatHandler(opts)
 	if err != nil {
+		if router != nil {
+			router.Close()
+		}
 		return fmt.Errorf("pocketbase: chat handler: %w", err)
 	}
-	mount := &chatMount{prefix: prefix, handler: handler, runner: runner, store: store}
+	mount := &chatMount{prefix: prefix, handler: handler, runner: runner, store: store, router: router}
 	s.chat = mount
 
 	// Expired proposals are ended in the background: no client is required to
@@ -198,11 +287,29 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 			if err := runner.Shutdown(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				e.App.Logger().Warn("MCP chat: runner shutdown did not finish in time", "error", err)
 			}
+			if mount.router != nil {
+				mount.router.Close()
+			}
 			return e.Next()
 		},
 	})
-	s.Adapter.app.Logger().Info("MCP chat enabled", "prefix", prefix, "mount", mountPath, "model", cfg.Model, "uploads", opts.Uploads)
+	logArgs := []any{"prefix", prefix, "mount", mountPath, "uploads", opts.Uploads}
+	if router != nil {
+		logArgs = append(logArgs, "providers", true, "managed", cfg.ManageProviders)
+	} else {
+		logArgs = append(logArgs, "model", cfg.Model)
+	}
+	s.Adapter.app.Logger().Info("MCP chat enabled", logArgs...)
 	return nil
+}
+
+// staticProviders returns the static source for the router. In managed mode
+// cfg.Providers is only a first-boot seed, so the database is authoritative.
+func staticProviders(cfg ChatConfig) []catalog.Provider {
+	if cfg.ManageProviders {
+		return nil
+	}
+	return cfg.Providers
 }
 
 // chatExpiryInterval is how often the background sweep ends overdue proposals.

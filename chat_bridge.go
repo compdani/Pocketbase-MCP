@@ -47,6 +47,16 @@ type ChatOptions struct {
 	// Store persists conversations, turns and events. Required, and it must be
 	// the store the Runner uses.
 	Store chat.Store
+	// Router supplies provider/model choices and resolves a turn's provider
+	// when a catalog is configured. Nil keeps the runner's single-provider
+	// path.
+	Router chat.ModelRouter
+	// ProviderAdmin, when set with AdminAuth, mounts the superuser provider
+	// management routes. The adapter builds it; a host normally leaves it nil.
+	ProviderAdmin chat.ProviderAdmin
+	// AdminAuth authenticates the provider admin routes. It must be a
+	// superuser-only authenticator and is only used for those routes.
+	AdminAuth chat.Authenticator
 	// Models is the model allowlist reported by GET /status.
 	Models []string
 	// MaxBodyBytes bounds a chat request body. Zero means the chat default.
@@ -123,6 +133,9 @@ func (s *Server) ChatHandler(opts ChatOptions) (http.Handler, error) {
 		Runner:                    opts.Runner,
 		Store:                     opts.Store,
 		Auth:                      &chatAuthenticator{s: s, namespace: opts.Namespace, policy: opts.Policy, writes: opts.Proposals, autoApprove: opts.AutoApprove},
+		Router:                    opts.Router,
+		ProviderAdmin:             opts.ProviderAdmin,
+		AdminAuth:                 opts.AdminAuth,
 		Models:                    opts.Models,
 		MaxBodyBytes:              opts.MaxBodyBytes,
 		MaxMessageChars:           opts.MaxMessageChars,
@@ -287,6 +300,42 @@ func (a *chatAuthenticator) Authenticate(r *http.Request) (chat.Caller, error) {
 		return chat.Caller{}, err
 	}
 	return a.s.chatCallerWithWrites(p, r, a.namespace, a.policy, a.writes, a.autoApprove), nil
+}
+
+// ChatAdminAuthenticator returns the superuser-only authenticator an adapter
+// uses for the provider admin routes. It is exported so an adapter can pass it
+// through ChatOptions without knowing the internal type.
+func (s *Server) ChatAdminAuthenticator(namespace string) chat.Authenticator {
+	return &chatAdminAuthenticator{s: s, namespace: namespace}
+}
+
+// chatAdminAuthenticator is the superuser-only gate for provider management.
+// It deliberately bypasses the chat policy and the AllowSuperusers opt-in: a
+// deployment can keep chat closed to superusers and still let one administer
+// providers. It grants no chat access and no tools.
+type chatAdminAuthenticator struct {
+	s         *Server
+	namespace string
+}
+
+func (a *chatAdminAuthenticator) Authenticate(r *http.Request) (chat.Caller, error) {
+	token := extractToken(r)
+	if token == "" {
+		return chat.Caller{}, chat.ErrUnauthorized
+	}
+	p, err := a.s.host.Authenticate(token)
+	if err != nil || !p.IsSuperuser {
+		return chat.Caller{}, chat.ErrForbidden
+	}
+	return chat.Caller{
+		Owner: chat.OwnerKey{
+			Namespace:        a.namespace,
+			Mount:            a.s.cfg.Path,
+			AuthCollectionID: p.CollectionID,
+			UserID:           p.ID,
+		},
+		Expires: tokenExpiry(token),
+	}, nil
 }
 
 // chatCaller binds one principal to one owner key, credential expiry and

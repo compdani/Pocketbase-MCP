@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/compdani/pocketbase-mcp/chat/provider"
 	"github.com/compdani/pocketbase-mcp/chat/provider/scripted"
 )
 
@@ -87,6 +88,41 @@ func TestRunnerSendsAttachments(t *testing.T) {
 		if bytes.Contains(ev.Data, []byte("hello")) {
 			t.Fatalf("event %s carries attachment content: %s", ev.Type, ev.Data)
 		}
+	}
+}
+
+func TestRunnerAttachmentSupportUsesTheTurnProvider(t *testing.T) {
+	store := NewMemStore(MemStoreOptions{})
+	prov := scripted.New(textStep("reply")).SupportOnly("text/plain")
+	router := &fakeChoiceRouter{
+		choices:   []ModelChoice{{ID: ChoiceID("a", "m"), Provider: "a", Model: "m", Default: true}},
+		providers: map[string]provider.Provider{ChoiceID("a", "m"): prov},
+	}
+	runner := mustRunner(t, RunnerConfig{Store: store, Router: router, Model: "m", Uploads: store})
+	if !runner.SupportsAttachment("application/pdf") {
+		t.Fatal("the catalog union should advertise PDF support")
+	}
+	owner := ownerFixture()
+	conv := mustConversation(t, store, owner, "per-job")
+	pdf := mustUpload(t, store, owner, conv.ID, "doc.pdf", "application/pdf", UploadKindPDF, []byte("%PDF-1.4"))
+	turn, _, err := runner.SubmitWithOptions(context.Background(), owner, conv.ID, SubmitOptions{
+		Text:        "read this",
+		Attachments: []Upload{pdf},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitTerminal(t, store, owner, turn.ID)
+	reqs := prov.Requests()
+	if len(reqs) != 1 {
+		t.Fatalf("provider saw %d requests", len(reqs))
+	}
+	last := reqs[0].Messages[len(reqs[0].Messages)-1]
+	if len(last.Attachments) != 0 {
+		t.Fatalf("the text-only provider received %d attachments", len(last.Attachments))
+	}
+	if !strings.Contains(last.Text, "omitted") {
+		t.Fatalf("missing omission note: %q", last.Text)
 	}
 }
 

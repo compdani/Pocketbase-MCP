@@ -351,6 +351,25 @@ func (s *MemStore) ActiveTurn(_ context.Context, owner OwnerKey, conversationID 
 	return Turn{}, false, nil
 }
 
+// FindTurnByIdempotencyKey implements IdempotentTurnStore.
+func (s *MemStore) FindTurnByIdempotencyKey(_ context.Context, owner OwnerKey, conversationID, key string) (Turn, bool, error) {
+	if key == "" {
+		return Turn{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, err := s.ownedConversationLocked(owner, conversationID)
+	if err != nil {
+		return Turn{}, false, err
+	}
+	for _, id := range rec.turnIDs {
+		if t, ok := s.turns[id]; ok && t.turn.IdempotencyKey == key && t.turn.Owner.Equal(owner) {
+			return cloneTurn(t.turn), true, nil
+		}
+	}
+	return Turn{}, false, nil
+}
+
 // RecentMessages implements RecentMessageStore.
 func (s *MemStore) RecentMessages(_ context.Context, owner OwnerKey, conversationID string, limit int) ([]Message, error) {
 	s.mu.Lock()

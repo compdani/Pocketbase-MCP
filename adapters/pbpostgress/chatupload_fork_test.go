@@ -67,7 +67,7 @@ func TestChatStoreUploadUpgradeFromFiveCollections(t *testing.T) {
 		maxEvents:     chat.DefaultMaxEventsPerTurn,
 	}
 	for _, spec := range legacy.specs()[:5] {
-		if err := provisionChatCollection(app, spec); err != nil {
+		if _, err := provisionChatCollection(app, spec); err != nil {
 			t.Fatalf("provision pre-upload collection: %v", err)
 		}
 	}

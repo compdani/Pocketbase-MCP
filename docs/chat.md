@@ -24,7 +24,8 @@ it.
 
 ## 1. Turning it on
 
-In a PocketBase adapter, call `EnableChat` before `RegisterRoutes`:
+In a PocketBase adapter, call `EnableChat` before `RegisterRoutes`. The simple
+form uses one provider:
 
 ```go
 err := srv.EnableChat(pb.ChatConfig{
@@ -34,6 +35,31 @@ err := srv.EnableChat(pb.ChatConfig{
     System:   "You help users manage their listings.",
 })
 ```
+
+A catalog gives every turn a provider and model choice, including several
+OpenAI-compatible gateways and a signed-in ChatGPT/Codex plan:
+
+```go
+err := srv.EnableChat(pb.ChatConfig{
+    Options: pbmcp.ChatOptions{
+        Namespace: "my-app", Proposals: true, Uploads: true,
+    },
+    // Managed mode provisions three private provider collections and mounts
+    // the superuser settings API under <Prefix>/providers.
+    ManageProviders: true,
+    // Optional first-boot seed; later changes go through the settings API.
+    Providers: []catalog.Provider{{
+        ID: "openai", Kind: catalog.KindOpenAI, Enabled: true,
+        BaseURL: "https://api.openai.com/v1",
+        Models: []catalog.Model{{ID: "gpt-5"}}, DefaultModel: "gpt-5",
+    }},
+    System: "You help users manage their listings.",
+})
+```
+
+Static mode (`Providers` without `ManageProviders`) builds the catalog at
+startup and mounts no settings routes. The legacy `Provider` + `Model` form
+remains supported and works exactly as before.
 
 `EnableChat` creates the private chat collections, builds the turn runner,
 recovers from a previous crash (section 4) and mounts the API.
@@ -83,6 +109,14 @@ ever read from that header, never from a URL.
 | `POST /proposals/{id}/outcome` | Browser reports an editor result (proposals on) |
 | `POST /uploads` | Upload a file to a conversation (uploads on) |
 | `GET /uploads/{id}`, `GET /uploads/{id}/meta` | Download a file, or read its details (uploads on) |
+
+When managed providers are on, the same prefix also serves a superuser-only
+settings surface: `GET/POST /providers`, `GET/PATCH/DELETE /providers/{id}`,
+`POST /providers/actions/test`, `POST /providers/actions/default`,
+`POST /providers/{id}/test`, `POST /providers/{id}/models/refresh`, and the Codex
+`signin`, `signin/complete`, `signin/cancel`, `signout` and `import` routes. It
+uses a separate superuser authenticator and never widens the normal chat
+surface. See [Managing providers](#managing-providers) for the update rules.
 
 Routes for features that are off return 404. Another user's records also
 return 404, the same as missing ones, so nothing leaks. Errors are
@@ -276,17 +310,116 @@ a message by its upload ID (up to 5 per message).
 ## 8. Model providers
 
 Providers are hand-written over `net/http` with an in-house SSE parser; there
-are no vendor SDKs, and API keys stay on the server.
+are no vendor SDKs, and credentials stay on the server.
 
 | Package | Speaks |
 |---|---|
-| `chat/provider/openai` | OpenAI-compatible streaming Chat Completions (also works with gateways via `BaseURL`) |
+| `chat/provider/openai` | OpenAI-compatible streaming Chat Completions, or the Responses shape (`WireAPI: "responses"`) |
 | `chat/provider/anthropic` | Anthropic Messages API |
+| `chat/provider/codex` | ChatGPT/Codex plan sign-in: OAuth, refresh tokens, ID-token verification, model list |
+| `chat/provider/catalog` | Named provider config, per-turn routing, superuser settings service |
 | `chat/provider/scripted` | A scripted provider for tests |
 
-Both real adapters support tool calls and attachments (images, PDF, text).
+All real adapters support tool calls and attachments (images, PDF, text).
 Request bodies are capped at 32 MiB to fit base64 attachments. A feature a
 provider doesn't support fails clearly instead of being dropped.
+
+### Catalog
+
+A catalog entry has a stable `id`, a display label, a kind, a base URL, an
+optional wire API, a model allowlist and a default model. Kinds:
+
+- `openai` — Chat Completions by default, or Responses with
+  `wireAPI: "responses"`. Each entry has its own base URL, key, headers, models
+  and optional `extraBody`.
+- `anthropic` — Messages API.
+- `codex` — OpenAI Responses against `https://api.openai.com/v1`, authorized by
+  a ChatGPT plan sign-in rather than an API key.
+
+`GET /status` keeps the old flat `models` list and adds `choices` and
+`defaultChoice`:
+
+```json
+{
+  "models": ["gpt-5", "gpt-5-codex"],
+  "choices": [
+    {"id": "openai::gpt-5", "provider": "openai", "model": "gpt-5",
+     "label": "GPT-5", "group": "OpenAI", "default": true,
+     "attachmentTypes": ["text/plain", "image/png", "application/pdf"]}
+  ],
+  "defaultChoice": "openai::gpt-5"
+}
+```
+
+A turn names `provider` and `model`; both are optional. Omitting both uses the
+default; naming only a model uses the default provider when it offers that
+model, otherwise the unique provider that does. The resolved pair is stored on
+the turn (`provider` is absent on older turns). A turn is resolved once, so a
+catalog change never switches a running turn to another provider.
+
+### Managing providers
+
+The settings API follows these rules:
+
+- **Create never replaces.** `POST /providers` with an id that already exists
+  is `409 conflict`; use `PATCH /providers/{id}` to change it. The id and the
+  kind are fixed once created.
+- **Secrets are write-only.** In a `PATCH`, an omitted `apiKey` or `headers`
+  keeps the stored value, an empty one clears it, and any other value replaces
+  it. Views only show `hasApiKey`, a last-four `apiKeyHint` and `headerNames`.
+- **Unreadable secrets must be re-entered.** If a stored key or header blob
+  can't be decrypted (usually a changed `PB_ENCRYPTION_KEY`), that provider
+  drops out of `/status` and its view shows `lastError`. The other providers
+  keep working. The next update must re-enter the secret that failed. Sending
+  only the other one is rejected, so the unreadable one is never saved as empty.
+- **Changing a base URL keeps the key.** The stored key and headers are sent
+  to whatever `baseURL` the entry names, including in `POST
+  /providers/actions/test` with a saved id. When you point an entry at a
+  different host, re-enter its key rather than reusing it.
+- **Changing a Codex `oauthBaseURL`** rebuilds that provider's sign-in state
+  and drops any pending sign-in. The stored credentials stay.
+- **Deleting** removes the config, any Codex credentials, and the default
+  choice if it pointed there. A refresh still running for that provider can't
+  write its credentials back.
+
+### Model discovery
+
+The settings API fetches a provider's `/models` endpoint on demand; an explicit
+refresh updates the allowlist after creation. OpenAI-compatible entries use
+`GET {baseURL}/models` with the bearer key; Codex uses a fresh plan token and
+skips entries whose `visibility` is set and is not `list`; Anthropic uses
+`GET {baseURL}/v1/models` where available. The fetched list is stored as the
+explicit allowlist (auto-populated when a provider is created with no models,
+or after Codex sign-in), so a chat page load never fans out to provider APIs
+and a gateway cannot silently widen the picker.
+
+### Codex plan sign-in
+
+A superuser starts sign-in from the settings API. The server creates a
+10-minute pending attempt and returns an authorization URL. On a browser on the
+server's machine a loopback listener completes it; on a remote browser the
+superuser pastes the redirect URL back into the settings API. Only one attempt
+per provider runs at a time. It belongs to the superuser who started it, and
+cancelling it or starting a new one closes the old loopback listener. Credentials and
+the rotating refresh token are encrypted at rest, refreshed ten minutes before
+expiry, and refreshed once more on a 401. Signing out revokes the refresh token
+and removes the choice from `/status`.
+
+OpenAI offers ChatGPT plan usage for open-source and locally hosted apps. A
+paid or remotely hosted deployment is expected to apply through OpenAI's
+interest form; do not assume plan tokens may be shared by an arbitrary
+production deployment.
+
+### Settings storage
+
+Managed mode provisions three private collections with the chat prefix:
+`_mcpChatProviders`, `_mcpChatProviderAuth` and `_mcpChatSettings`. They are
+scoped by namespace and mount, have nil API rules (superuser-only), and are
+never exposed through the manifest. API keys, header values and OAuth
+credentials are encrypted with PocketBase's `security.Encrypt` and the app's
+encryption key (normally `PB_ENCRYPTION_KEY`). If that key is absent, the settings API refuses
+to store a secret instead of writing plaintext. The admin API never returns a
+key, header value or token; only a last-four hint and header names.
 
 ## 9. Browser client and examples
 
@@ -315,8 +448,10 @@ attached files are acknowledged. Environment variables for both examples:
 
 | Variable | Effect |
 |---|---|
-| `MCP_CHAT_PROVIDER` | `openai`, `anthropic` or (stock only) `demo`; unset leaves chat off |
-| `MCP_CHAT_MODEL`, `MCP_CHAT_API_KEY`, `MCP_CHAT_BASE_URL`, `MCP_CHAT_SYSTEM` | Provider settings |
+| `MCP_CHAT_PROVIDER` | Legacy single provider: `openai`, `anthropic` or (stock only) `demo`; unset leaves chat off |
+| `MCP_CHAT_MODEL`, `MCP_CHAT_API_KEY`, `MCP_CHAT_BASE_URL`, `MCP_CHAT_SYSTEM` | Legacy provider settings |
+| `MCP_CHAT_PROVIDERS_FILE` | JSON file of catalog providers for first-boot seeding; mutually exclusive with `MCP_CHAT_PROVIDER` |
+| `MCP_CHAT_MANAGE` | `true` starts managed mode with no seed; the settings API adds providers |
 | `MCP_CHAT_PROPOSALS`, `MCP_CHAT_AUTO_APPROVE`, `MCP_CHAT_ARG_EDITS` | Proposal settings (proposals need `MCP_ALLOW_WRITES=true`) |
 | `MCP_CHAT_UPLOADS`, `MCP_CHAT_MAX_UPLOAD_BYTES` | Upload settings |
 

@@ -79,8 +79,14 @@ var (
 type RunnerConfig struct {
 	Store    Store
 	Provider provider.Provider
-	// Model is recorded on each turn and sent with every provider request.
+	// Model is recorded on each turn and sent with every provider request. It
+	// is the legacy single-provider default; when Router is set it is only a
+	// fallback for a router that has no configured default.
 	Model string
+	// Router, when set, resolves a per-turn provider and model from the
+	// provider catalog. Provider and Model remain the legacy single-provider
+	// path.
+	Router ModelRouter
 	// System is the system prompt sent with every provider request.
 	System string
 	// MaxSteps bounds model steps per turn, counting tool round trips. Zero
@@ -172,6 +178,8 @@ type turnJob struct {
 	owner          OwnerKey
 	turnID         string
 	conversationID string
+	provider       provider.Provider
+	providerID     string
 	model          string
 	tools          ToolExecutor
 	deadline       time.Time
@@ -188,8 +196,8 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if cfg.Store == nil {
 		return nil, errors.New("chat: runner requires a store")
 	}
-	if cfg.Provider == nil {
-		return nil, errors.New("chat: runner requires a provider")
+	if cfg.Provider == nil && cfg.Router == nil {
+		return nil, errors.New("chat: runner requires a provider or a model router")
 	}
 	if cfg.MaxSteps <= 0 {
 		cfg.MaxSteps = defaultMaxSteps
@@ -262,9 +270,49 @@ func (r *Runner) UploadsEnabled() bool { return r.cfg.Uploads != nil }
 // support supports none, so the upload surface degrades to text only instead of
 // silently dropping files.
 func (r *Runner) SupportsAttachment(mimeType string) bool {
+	if r.cfg.Router != nil {
+		return r.cfg.Router.SupportsAttachment(mimeType)
+	}
 	support, ok := r.cfg.Provider.(provider.AttachmentSupport)
 	return ok && support.SupportsAttachment(mimeType)
 }
+
+// Choices lists the selectable provider/model pairs. A runner without a router
+// has the legacy single choice, or none when no model is configured.
+func (r *Runner) Choices(ctx context.Context) ([]ModelChoice, error) {
+	if r.cfg.Router != nil {
+		return r.cfg.Router.Choices(ctx)
+	}
+	if strings.TrimSpace(r.cfg.Model) == "" {
+		return nil, nil
+	}
+	return []ModelChoice{{
+		ID:      ChoiceID("", r.cfg.Model),
+		Model:   r.cfg.Model,
+		Label:   r.cfg.Model,
+		Default: true,
+	}}, nil
+}
+
+// DefaultChoice returns the choice a turn uses when it names neither provider
+// nor model.
+func (r *Runner) DefaultChoice(ctx context.Context) (ModelChoice, error) {
+	if r.cfg.Router != nil {
+		return r.cfg.Router.Default(ctx)
+	}
+	if strings.TrimSpace(r.cfg.Model) == "" || r.cfg.Provider == nil {
+		return ModelChoice{}, ErrNoModelConfigured
+	}
+	return ModelChoice{
+		ID:      ChoiceID("", r.cfg.Model),
+		Model:   r.cfg.Model,
+		Label:   r.cfg.Model,
+		Default: true,
+	}, nil
+}
+
+// Router returns the configured model router, or nil for the legacy path.
+func (r *Runner) Router() ModelRouter { return r.cfg.Router }
 
 // SubmitOptions is one turn submission. Text is the only required field; every
 // other field has a neutral default: the runner's model, no deduplication, no
@@ -280,9 +328,17 @@ type SubmitOptions struct {
 	// IdempotencyKey deduplicates a submission whose response was lost. An
 	// empty key means the submission is not deduplicated.
 	IdempotencyKey string
+	// Provider selects a catalog provider. Empty means the default provider,
+	// or the legacy single provider when no router is configured.
+	Provider string
 	// Model overrides the runner's default model for this turn. Empty means the
-	// runner's configured model.
+	// provider's default model, or the runner's configured model on the legacy
+	// path.
 	Model string
+	// Target is an already-resolved choice. The HTTP handler sets it after
+	// resolving and validating attachments; leaving it nil lets the runner
+	// resolve through its router.
+	Target *ResolvedModel
 	// Tools is the caller-bound executor the turn may call. Nil means the turn
 	// runs without tools.
 	Tools ToolExecutor
@@ -304,14 +360,29 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 	if err := owner.Validate(); err != nil {
 		return Turn{}, false, err
 	}
-	model := opts.Model
-	if model == "" {
-		model = r.cfg.Model
+	// A retry with the same key must return the stored turn even if the
+	// provider or model it named has since disappeared. Do this before
+	// resolving the choice so a stale retry cannot fail.
+	if opts.IdempotencyKey != "" {
+		if finder, ok := r.cfg.Store.(IdempotentTurnStore); ok {
+			turn, found, err := finder.FindTurnByIdempotencyKey(ctx, owner, conversationID, opts.IdempotencyKey)
+			if err != nil {
+				return Turn{}, false, err
+			}
+			if found {
+				return turn, false, nil
+			}
+		}
+	}
+	resolved, err := r.resolveTarget(ctx, opts)
+	if err != nil {
+		return Turn{}, false, err
 	}
 	turn, created, err := r.cfg.Store.CreateTurn(ctx, owner, Turn{
 		ConversationID: conversationID,
 		IdempotencyKey: opts.IdempotencyKey,
-		Model:          model,
+		Provider:       resolved.Choice.Provider,
+		Model:          resolved.Model,
 	})
 	if err != nil {
 		return Turn{}, false, err
@@ -350,7 +421,9 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 		owner:          owner,
 		turnID:         turn.ID,
 		conversationID: conversationID,
-		model:          model,
+		provider:       resolved.Provider,
+		providerID:     resolved.Choice.Provider,
+		model:          resolved.Model,
 		tools:          opts.Tools,
 		deadline:       opts.Deadline,
 		done:           make(chan struct{}),
@@ -368,6 +441,45 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 	r.mu.Unlock()
 
 	return turn, true, nil
+}
+
+// resolveTarget turns a submission's provider/model (or an already-resolved
+// target) into the concrete provider and wire model for the turn. It runs
+// before CreateTurn so an unknown choice never leaves a failed turn behind.
+func (r *Runner) resolveTarget(ctx context.Context, opts SubmitOptions) (ResolvedModel, error) {
+	if opts.Target != nil {
+		if opts.Target.Provider == nil {
+			return ResolvedModel{}, ErrModelUnknown
+		}
+		target := *opts.Target
+		if target.Model == "" {
+			target.Model = target.Choice.Model
+		}
+		return target, nil
+	}
+	if r.cfg.Router != nil {
+		return r.cfg.Router.Resolve(ctx, strings.TrimSpace(opts.Provider), strings.TrimSpace(opts.Model))
+	}
+	if strings.TrimSpace(opts.Provider) != "" {
+		return ResolvedModel{}, ErrModelUnknown
+	}
+	model := strings.TrimSpace(opts.Model)
+	if model == "" {
+		model = strings.TrimSpace(r.cfg.Model)
+	}
+	if model == "" || r.cfg.Provider == nil {
+		return ResolvedModel{}, ErrNoModelConfigured
+	}
+	return ResolvedModel{
+		Choice: ModelChoice{
+			ID:      ChoiceID("", model),
+			Model:   model,
+			Label:   model,
+			Default: true,
+		},
+		Provider: r.cfg.Provider,
+		Model:    model,
+	}, nil
 }
 
 // Submit is SubmitWithOptions without a per-turn model override.
@@ -628,7 +740,11 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 			r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
 			return
 		}
-		ch, err := r.cfg.Provider.Stream(ctx, req)
+		if j.provider == nil {
+			r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+			return
+		}
+		ch, err := j.provider.Stream(ctx, req)
 		if err != nil {
 			if stop := r.stopKind(ctx, j); stop != "" {
 				r.finishStopped(j, stop)
@@ -1142,7 +1258,7 @@ func (r *Runner) history(ctx context.Context, j *turnJob) ([]provider.Message, e
 		return nil, err
 	}
 	stored = trimHistory(stored, r.cfg.MaxHistoryMessages)
-	return normalizeHistory(providerMessagesWith(stored, r.resolveAttachments(ctx, j.owner, stored))), nil
+	return normalizeHistory(providerMessagesWith(stored, r.resolveAttachments(ctx, j, stored))), nil
 }
 
 // resolveAttachments reads the uploads the history window references. Newest
@@ -1150,10 +1266,11 @@ func (r *Runner) history(ctx context.Context, j *turnJob) ([]provider.Message, e
 // send, or a file that does not fit leaves no entry, and providerMessages turns
 // that into an omission note. Only upload ids recorded in this conversation are
 // ever read, so a part cannot address an arbitrary record or URL.
-func (r *Runner) resolveAttachments(ctx context.Context, owner OwnerKey, msgs []Message) map[string][]byte {
+func (r *Runner) resolveAttachments(ctx context.Context, j *turnJob, msgs []Message) map[string][]byte {
 	if r.cfg.Uploads == nil {
 		return nil
 	}
+	owner := j.owner
 	budget := r.cfg.MaxAttachmentBytesPerRequest
 	if budget <= 0 {
 		budget = defaultMaxAttachmentBytesPerRequest
@@ -1167,7 +1284,7 @@ func (r *Runner) resolveAttachments(ctx context.Context, owner OwnerKey, msgs []
 			if _, done := resolved[p.UploadID]; done {
 				continue
 			}
-			if !r.SupportsAttachment(p.MIME) {
+			if !supportsProviderAttachment(j.provider, p.MIME) {
 				continue
 			}
 			u, data, err := r.cfg.Uploads.ReadUpload(ctx, owner, p.UploadID)
@@ -1182,6 +1299,18 @@ func (r *Runner) resolveAttachments(ctx context.Context, owner OwnerKey, msgs []
 		}
 	}
 	return resolved
+}
+
+// supportsProviderAttachment checks the provider selected for this turn, not
+// the catalog's union. The upload surface uses the union because a file may be
+// attached before the user picks a provider; the turn itself must only send a
+// type its resolved provider understands.
+func supportsProviderAttachment(p provider.Provider, mimeType string) bool {
+	if p == nil {
+		return false
+	}
+	support, ok := p.(provider.AttachmentSupport)
+	return ok && support.SupportsAttachment(mimeType)
 }
 
 // attachmentOmittedNote is the only thing the model sees for an attachment it

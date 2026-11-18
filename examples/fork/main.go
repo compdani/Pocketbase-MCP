@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -18,6 +19,7 @@ import (
 	pb "github.com/compdani/pocketbase-mcp/adapters/pbpostgress"
 	"github.com/compdani/pocketbase-mcp/chat/provider"
 	"github.com/compdani/pocketbase-mcp/chat/provider/anthropic"
+	"github.com/compdani/pocketbase-mcp/chat/provider/catalog"
 	"github.com/compdani/pocketbase-mcp/chat/provider/openai"
 )
 
@@ -172,8 +174,13 @@ func main() {
 // example's own turns and reconciles only its own proposals.
 func enableChat(srv *pb.Server, allowWrites bool) error {
 	name := strings.ToLower(strings.TrimSpace(os.Getenv("MCP_CHAT_PROVIDER")))
-	if name == "" {
+	providersFile := strings.TrimSpace(os.Getenv("MCP_CHAT_PROVIDERS_FILE"))
+	manage := strings.TrimSpace(os.Getenv("MCP_CHAT_MANAGE")) == "true"
+	if name == "" && providersFile == "" && !manage {
 		return nil
+	}
+	if name != "" && (providersFile != "" || manage) {
+		return fmt.Errorf("set either MCP_CHAT_PROVIDER or MCP_CHAT_PROVIDERS_FILE/MCP_CHAT_MANAGE, not both")
 	}
 	proposals := os.Getenv("MCP_CHAT_PROPOSALS") == "true"
 	autoApprove := os.Getenv("MCP_CHAT_AUTO_APPROVE") == "true"
@@ -189,23 +196,64 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 	if !proposals && (autoApprove || argEdits) {
 		return fmt.Errorf("MCP_CHAT_AUTO_APPROVE and MCP_CHAT_ARG_EDITS require MCP_CHAT_PROPOSALS=true")
 	}
-	model := strings.TrimSpace(os.Getenv("MCP_CHAT_MODEL"))
-	if model == "" {
-		return fmt.Errorf("MCP_CHAT_MODEL is required when MCP_CHAT_PROVIDER=%q", name)
+	system := os.Getenv("MCP_CHAT_SYSTEM")
+	opts := pbmcp.ChatOptions{
+		Namespace:          "example-fork",
+		Prefix:             pbmcp.DefaultChatPrefix,
+		Proposals:          proposals,
+		AutoApprove:        autoApprove,
+		AllowArgumentEdits: argEdits,
+		Uploads:            uploads,
+		MaxUploadBytes:     maxUploadBytes,
 	}
+
+	if providersFile != "" || manage {
+		for _, key := range []string{"MCP_CHAT_MODEL", "MCP_CHAT_API_KEY", "MCP_CHAT_BASE_URL"} {
+			if strings.TrimSpace(os.Getenv(key)) != "" {
+				return fmt.Errorf("%s is only for the legacy MCP_CHAT_PROVIDER mode; put providers in MCP_CHAT_PROVIDERS_FILE instead", key)
+			}
+		}
+		var providers []catalog.Provider
+		if providersFile != "" {
+			providers, err = loadChatProviders(providersFile)
+			if err != nil {
+				return err
+			}
+		}
+		if err := srv.EnableChat(pb.ChatConfig{
+			Options:         opts,
+			ManageProviders: true,
+			Providers:       providers,
+			System:          system,
+		}); err != nil {
+			return fmt.Errorf("enable chat: %w", err)
+		}
+		log.Printf("chat enabled in managed provider mode at %s (settings: %s/providers)", pbmcp.DefaultChatPrefix, pbmcp.DefaultChatPrefix)
+		if providersFile != "" {
+			log.Printf("seeded %d provider(s) from %s on first boot", len(providers), providersFile)
+		}
+		return nil
+	}
+
+	model := strings.TrimSpace(os.Getenv("MCP_CHAT_MODEL"))
 	apiKey := os.Getenv("MCP_CHAT_API_KEY")
 	baseURL := strings.TrimSpace(os.Getenv("MCP_CHAT_BASE_URL"))
-	system := os.Getenv("MCP_CHAT_SYSTEM")
 
 	var prov provider.Provider
 	switch name {
 	case "openai":
+		if model == "" {
+			return fmt.Errorf("MCP_CHAT_MODEL is required when MCP_CHAT_PROVIDER=%q", name)
+		}
 		built, err := openai.New(openai.Config{BaseURL: baseURL, APIKey: apiKey})
 		if err != nil {
 			return fmt.Errorf("chat provider: %w", err)
 		}
 		prov = built
 	case "anthropic":
+		if model == "" {
+			return fmt.Errorf("MCP_CHAT_MODEL is required when MCP_CHAT_PROVIDER=%q", name)
+		}
 		built, err := anthropic.New(anthropic.Config{BaseURL: baseURL, APIKey: apiKey})
 		if err != nil {
 			return fmt.Errorf("chat provider: %w", err)
@@ -216,15 +264,7 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 	}
 
 	if err := srv.EnableChat(pb.ChatConfig{
-		Options: pbmcp.ChatOptions{
-			Namespace:          "example-fork",
-			Prefix:             pbmcp.DefaultChatPrefix,
-			Proposals:          proposals,
-			AutoApprove:        autoApprove,
-			AllowArgumentEdits: argEdits,
-			Uploads:            uploads,
-			MaxUploadBytes:     maxUploadBytes,
-		},
+		Options:  opts,
 		Provider: prov,
 		Model:    model,
 		System:   system,
@@ -239,6 +279,75 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 	}
 	log.Printf("chat enabled with provider %s and model %s at %s", name, model, pbmcp.DefaultChatPrefix)
 	return nil
+}
+
+// loadChatProviders reads a non-secret (or 0600) provider file for first-boot
+// seeding. The file is intentionally not an env-var list: it can be checked in
+// without keys, and the admin API handles later changes.
+func loadChatProviders(path string) ([]catalog.Provider, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var file struct {
+		Providers []struct {
+			ID           string `json:"id"`
+			Label        string `json:"label"`
+			Kind         string `json:"kind"`
+			Enabled      *bool  `json:"enabled"`
+			BaseURL      string `json:"baseURL"`
+			OAuthBaseURL string `json:"oauthBaseURL"`
+			WireAPI      string `json:"wireAPI"`
+			Models       []struct {
+				ID    string `json:"id"`
+				Label string `json:"label"`
+			} `json:"models"`
+			DefaultModel string            `json:"defaultModel"`
+			Headers      map[string]string `json:"headers"`
+			ExtraBody    map[string]any    `json:"extraBody"`
+			APIKey       string            `json:"apiKey"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	out := make([]catalog.Provider, 0, len(file.Providers))
+	hasKey := false
+	for _, item := range file.Providers {
+		enabled := true
+		if item.Enabled != nil {
+			enabled = *item.Enabled
+		}
+		models := make([]catalog.Model, 0, len(item.Models))
+		for _, m := range item.Models {
+			models = append(models, catalog.Model{ID: m.ID, Label: m.Label})
+		}
+		p := catalog.Provider{
+			ID:           item.ID,
+			Label:        item.Label,
+			Kind:         catalog.Kind(item.Kind),
+			Enabled:      enabled,
+			BaseURL:      item.BaseURL,
+			OAuthBaseURL: item.OAuthBaseURL,
+			WireAPI:      item.WireAPI,
+			Models:       models,
+			DefaultModel: item.DefaultModel,
+			Headers:      item.Headers,
+			ExtraBody:    item.ExtraBody,
+			APIKey:       item.APIKey,
+		}.Normalized()
+		if err := p.Validate(); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		if p.APIKey != "" {
+			hasKey = true
+		}
+		out = append(out, p)
+	}
+	if hasKey {
+		log.Printf("warning: %s contains API keys; keep it out of version control and chmod 600", path)
+	}
+	return out, nil
 }
 
 // chatMaxUploadBytes reads the optional MCP_CHAT_MAX_UPLOAD_BYTES limit. An

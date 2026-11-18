@@ -44,6 +44,22 @@ const (
 // response.
 type HTTPError = httperr.Error
 
+// WireAPI values for Config.WireAPI.
+const (
+	// WireChatCompletions is the OpenAI-compatible Chat Completions shape.
+	WireChatCompletions = "chat"
+	// WireResponses is the OpenAI Responses shape used by the Codex plan route
+	// and by Responses-compatible gateways.
+	WireResponses = "responses"
+)
+
+// TokenSource supplies a bearer token for one request. forceRefresh asks the
+// source to renew even if its cached token has not reached its refresh window;
+// the provider uses it once after a 401.
+type TokenSource interface {
+	Token(ctx context.Context, forceRefresh bool) (string, error)
+}
+
 // Config configures a Provider. Only APIKey and BaseURL usually matter; the
 // rest exist for compatible gateways and tests.
 type Config struct {
@@ -52,8 +68,11 @@ type Config struct {
 	BaseURL string
 	// APIKey is sent as a bearer token. Empty omits the Authorization header,
 	// which local gateways sometimes need; an extra header can supply another
-	// scheme.
+	// scheme. TokenSource, when set, overrides it per request.
 	APIKey string
+	// TokenSource, when set, supplies a fresh bearer token for each request.
+	// It is used by the Codex plan provider and by short-lived gateway tokens.
+	TokenSource TokenSource
 	// HTTPClient is used for every request. Nil means http.DefaultClient.
 	HTTPClient *http.Client
 	// Headers are extra request headers, applied before the protocol headers.
@@ -61,16 +80,24 @@ type Config struct {
 	Headers map[string]string
 	// Name identifies the provider. Empty means "openai".
 	Name string
+	// WireAPI selects the wire shape. Empty means WireChatCompletions.
+	WireAPI string
+	// ExtraBody is merged into the encoded request body last. It is for
+	// non-secret gateway-specific fields.
+	ExtraBody map[string]any
 }
 
 // Provider is an OpenAI-compatible streaming chat provider. It is safe for
 // concurrent Stream calls.
 type Provider struct {
-	baseURL string
-	apiKey  string
-	client  *http.Client
-	headers map[string]string
-	name    string
+	baseURL     string
+	apiKey      string
+	tokenSource TokenSource
+	client      *http.Client
+	headers     map[string]string
+	name        string
+	wire        string
+	extraBody   map[string]any
 }
 
 var _ provider.Provider = (*Provider)(nil)
@@ -94,6 +121,15 @@ func New(cfg Config) (*Provider, error) {
 	if name == "" {
 		name = defaultName
 	}
+	wire := strings.TrimSpace(cfg.WireAPI)
+	if wire == "" {
+		wire = WireChatCompletions
+	}
+	switch wire {
+	case WireChatCompletions, WireResponses:
+	default:
+		return nil, fmt.Errorf("openai: unsupported wire API %q", cfg.WireAPI)
+	}
 	client := cfg.HTTPClient
 	if client == nil {
 		client = http.DefaultClient
@@ -102,12 +138,19 @@ func New(cfg Config) (*Provider, error) {
 	for k, v := range cfg.Headers {
 		headers[k] = v
 	}
+	extra := make(map[string]any, len(cfg.ExtraBody))
+	for k, v := range cfg.ExtraBody {
+		extra[k] = v
+	}
 	return &Provider{
-		baseURL: base,
-		apiKey:  cfg.APIKey,
-		client:  client,
-		headers: headers,
-		name:    name,
+		baseURL:     base,
+		apiKey:      cfg.APIKey,
+		tokenSource: cfg.TokenSource,
+		client:      client,
+		headers:     headers,
+		name:        name,
+		wire:        wire,
+		extraBody:   extra,
 	}, nil
 }
 
@@ -121,8 +164,13 @@ func (p *Provider) SupportsAttachment(mimeType string) bool {
 	return provider.SupportsAttachment(mimeType)
 }
 
-// endpoint is the chat completions URL.
-func (p *Provider) endpoint() string { return p.baseURL + "/chat/completions" }
+// endpoint is the wire endpoint for this provider.
+func (p *Provider) endpoint() string {
+	if p.wire == WireResponses {
+		return p.baseURL + "/responses"
+	}
+	return p.baseURL + "/chat/completions"
+}
 
 // Stream implements provider.Provider. Request-construction problems are
 // returned as an error; transport and protocol failures arrive as an error
@@ -131,7 +179,13 @@ func (p *Provider) Stream(ctx context.Context, req provider.Request) (<-chan pro
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
-	body, err := p.buildBody(req)
+	var body []byte
+	var err error
+	if p.wire == WireResponses {
+		body, err = p.buildResponsesBody(req)
+	} else {
+		body, err = p.buildBody(req)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +310,28 @@ func (p *Provider) buildBody(req provider.Request) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("openai: encode request: %w", err)
 	}
-	return body, nil
+	return p.mergeExtraBody(body)
+}
+
+// mergeExtraBody applies Config.ExtraBody to an already encoded request. It is
+// applied last, so a gateway-specific field can override the adapter's default
+// without the adapter having to know the gateway.
+func (p *Provider) mergeExtraBody(body []byte) ([]byte, error) {
+	if len(p.extraBody) == 0 {
+		return body, nil
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, fmt.Errorf("openai: encode request: %w", err)
+	}
+	for k, v := range p.extraBody {
+		fields[k] = v
+	}
+	merged, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("openai: encode request: %w", err)
+	}
+	return merged, nil
 }
 
 func wireMessageFor(m provider.Message) (wireMessage, error) {
@@ -390,37 +465,67 @@ func toolResult(raw json.RawMessage) (string, error) {
 // --- streaming ---
 
 func (p *Provider) stream(ctx context.Context, body []byte, ch chan<- provider.Chunk) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint(), bytes.NewReader(body))
-	if err != nil {
-		sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf("openai: build request: %w", err)})
-		return
-	}
-	for k, v := range p.headers {
-		httpReq.Header.Set(k, v)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	if p.apiKey != "" && httpReq.Header.Get("Authorization") == "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		if ctx.Err() != nil {
+	for attempt := 0; ; attempt++ {
+		token, err := p.requestToken(ctx, attempt > 0)
+		if err != nil {
+			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf("openai: token: %w", err)})
 			return
 		}
-		sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf("openai: request failed: %w", err)})
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint(), bytes.NewReader(body))
+		if err != nil {
+			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf("openai: build request: %w", err)})
+			return
+		}
+		for k, v := range p.headers {
+			httpReq.Header.Set(k, v)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "text/event-stream")
+		if token != "" && httpReq.Header.Get("Authorization") == "" {
+			httpReq.Header.Set("Authorization", "Bearer "+token)
+		}
+
+		resp, err := p.client.Do(httpReq)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf("openai: request failed: %w", err)})
+			return
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized && p.tokenSource != nil && attempt == 0 {
+			// A stale access token is expected for the plan route. Force one
+			// refresh and retry the same body; anything else is a real error.
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
+			resp.Body.Close()
+			continue
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			detail, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+			resp.Body.Close()
+			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: httperr.New(p.name, resp.StatusCode, detail, token)})
+			return
+		}
+
+		defer resp.Body.Close()
+		if p.wire == WireResponses {
+			p.consumeResponses(ctx, resp.Body, ch)
+		} else {
+			p.consume(ctx, resp.Body, ch)
+		}
 		return
 	}
-	defer resp.Body.Close()
+}
 
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-		sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: httperr.New(p.name, resp.StatusCode, detail, p.apiKey)})
-		return
+// requestToken returns the bearer token for one attempt. A nil source uses the
+// static API key.
+func (p *Provider) requestToken(ctx context.Context, forceRefresh bool) (string, error) {
+	if p.tokenSource == nil {
+		return p.apiKey, nil
 	}
-
-	p.consume(ctx, resp.Body, ch)
+	return p.tokenSource.Token(ctx, forceRefresh)
 }
 
 // toolAccum is one tool call being reassembled from fragments.

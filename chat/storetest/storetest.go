@@ -258,6 +258,7 @@ func mustCreateTurn(t *testing.T, s chat.Store, owner chat.OwnerKey, convID, key
 		ConversationID: convID,
 		Owner:          owner,
 		IdempotencyKey: key,
+		Provider:       "test-provider",
 		Model:          "test-model",
 	})
 	if err != nil {
@@ -271,6 +272,18 @@ func mustCreateTurn(t *testing.T, s chat.Store, owner chat.OwnerKey, convID, key
 	}
 	if turn.Owner != owner {
 		t.Fatalf("CreateTurn did not record the owner key: %+v", turn.Owner)
+	}
+	if turn.Provider != "test-provider" {
+		t.Fatalf("CreateTurn provider = %q, want test-provider", turn.Provider)
+	}
+	if finder, ok := s.(chat.IdempotentTurnStore); ok {
+		found, ok, err := finder.FindTurnByIdempotencyKey(ctx(), owner, convID, key)
+		if err != nil {
+			t.Fatalf("FindTurnByIdempotencyKey(%q): %v", key, err)
+		}
+		if !ok || found.ID != turn.ID || found.Provider != turn.Provider {
+			t.Fatalf("FindTurnByIdempotencyKey(%q) = %+v, %v; want %+v", key, found, ok, turn)
+		}
 	}
 	return turn
 }

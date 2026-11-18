@@ -260,13 +260,16 @@ type Part struct {
 // Turn is one unit of work in a conversation. IdempotencyKey deduplicates
 // submissions whose response was lost.
 type Turn struct {
-	ID             string      `json:"id"`
-	ConversationID string      `json:"conversationId"`
-	Owner          OwnerKey    `json:"-"`
-	State          TurnState   `json:"state"`
-	IdempotencyKey string      `json:"idempotencyKey,omitempty"`
-	Model          string      `json:"model,omitempty"`
-	CreatedAt      time.Time   `json:"createdAt"`
-	UpdatedAt      time.Time   `json:"updatedAt"`
-	Error          *TurnFailed `json:"error,omitempty"`
+	ID             string    `json:"id"`
+	ConversationID string    `json:"conversationId"`
+	Owner          OwnerKey  `json:"-"`
+	State          TurnState `json:"state"`
+	IdempotencyKey string    `json:"idempotencyKey,omitempty"`
+	// Provider is the catalog id that served the turn. Empty means the legacy
+	// single-provider path or a turn stored before the catalog existed.
+	Provider  string      `json:"provider,omitempty"`
+	Model     string      `json:"model,omitempty"`
+	CreatedAt time.Time   `json:"createdAt"`
+	UpdatedAt time.Time   `json:"updatedAt"`
+	Error     *TurnFailed `json:"error,omitempty"`
 }

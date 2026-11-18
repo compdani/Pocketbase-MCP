@@ -98,6 +98,7 @@ const (
 	chatFieldIdempotencyKey  = "idempotencyKey"
 	chatFieldIdempotencySlot = "idempotencySlot"
 	chatFieldActiveSlot      = "activeSlot"
+	chatFieldProvider        = "provider"
 	chatFieldModel           = "model"
 	chatFieldLastSeq         = "lastSeq"
 	chatFieldDroppedBefore   = "droppedBefore"
@@ -287,7 +288,7 @@ func NewChatStore(app core.App, opts ChatStoreOptions) (*ChatStore, error) {
 		}
 	}
 	for _, spec := range s.specs() {
-		if err := provisionChatCollection(app, spec); err != nil {
+		if _, err := provisionChatCollection(app, spec); err != nil {
 			return nil, err
 		}
 	}
@@ -319,6 +320,18 @@ type chatCollectionSpec struct {
 	name    string
 	fields  func() []core.Field
 	indexes []chatIndexSpec
+	// addFields names fields an older, otherwise compatible collection may be
+	// missing. adoptChatCollection adds them in place.
+	addFields []string
+}
+
+func (s chatCollectionSpec) allowsAdd(name string) bool {
+	for _, allowed := range s.addFields {
+		if allowed == name {
+			return true
+		}
+	}
+	return false
 }
 
 // chatTextField returns a bounded, schema-protected text field.
@@ -382,6 +395,8 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 		},
 		{
 			name: s.turns,
+			// v1.3 adds the provider to a turn. Older fork stores gain it in place.
+			addFields: []string{chatFieldProvider},
 			fields: func() []core.Field {
 				fields := chatOwnerTextFields()
 				return append(fields,
@@ -390,6 +405,7 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 					chatTextField(chatFieldIdempotencyKey, chatIdempotencyKeyFieldMax, true),
 					chatTextField(chatFieldIdempotencySlot, chatSlotMaxLen, true),
 					chatTextField(chatFieldActiveSlot, chatSlotMaxLen, true),
+					chatTextField(chatFieldProvider, chatMaxTextLen, true),
 					chatTextField(chatFieldModel, chatMaxTextLen, true),
 					&core.NumberField{Name: chatFieldLastSeq, OnlyInt: true, System: true},
 					&core.NumberField{Name: chatFieldDroppedBefore, OnlyInt: true, System: true},
@@ -498,7 +514,7 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 	}
 }
 
-func provisionChatCollection(app core.App, spec chatCollectionSpec) error {
+func provisionChatCollection(app core.App, spec chatCollectionSpec) (bool, error) {
 	// Collections are provisioned one at a time rather than in one enclosing
 	// transaction: MySQL DDL is not transactional, and on PostgreSQL a
 	// concurrent create that loses the name race aborts the whole transaction,
@@ -534,23 +550,38 @@ func provisionChatCollection(app core.App, spec chatCollectionSpec) error {
 			}
 			time.Sleep(time.Duration(20*(attempt+1)) * time.Millisecond)
 		}
-		return fmt.Errorf("chat store: provision collection %q: %w", spec.name, err)
+		return false, fmt.Errorf("chat store: provision collection %q: %w", spec.name, err)
 	}
-	return nil
+	return true, nil
 }
 
 // adoptChatCollection checks an existing collection and repairs a metadata/table
 // mismatch left by a non-transactional DDL race.
-func adoptChatCollection(app core.App, spec chatCollectionSpec, existing *core.Collection) error {
+func adoptChatCollection(app core.App, spec chatCollectionSpec, existing *core.Collection) (bool, error) {
 	if !app.HasTable(existing.Name) {
 		// The collection record committed but its table did not (possible on
 		// MySQL, where DDL implicitly commits). Recreate the missing table
 		// from the metadata rather than failing startup.
 		if err := app.SyncRecordTableSchema(existing, nil); err != nil {
-			return fmt.Errorf("chat store: create missing table for collection %q: %w", spec.name, err)
+			return false, fmt.Errorf("chat store: create missing table for collection %q: %w", spec.name, err)
 		}
 	}
-	return checkChatCollectionCompatible(spec, existing)
+	if err := checkChatCollectionCompatible(spec, existing); err != nil {
+		return false, err
+	}
+	added := false
+	for _, want := range spec.fields() {
+		if existing.Fields.GetByName(want.GetName()) == nil && spec.allowsAdd(want.GetName()) {
+			existing.Fields.Add(want)
+			added = true
+		}
+	}
+	if added {
+		if err := app.Save(existing); err != nil {
+			return false, fmt.Errorf("chat store: upgrade collection %q: %w", spec.name, err)
+		}
+	}
+	return added, nil
 }
 
 // chatAlreadyExists reports an "object already exists" failure from a
@@ -585,6 +616,9 @@ func checkChatCollectionCompatible(spec chatCollectionSpec, existing *core.Colle
 	for _, want := range spec.fields() {
 		got := existing.Fields.GetByName(want.GetName())
 		if got == nil {
+			if spec.allowsAdd(want.GetName()) {
+				continue
+			}
 			return conflict("missing field %q (%s)", want.GetName(), want.Type())
 		}
 		if got.Type() != want.Type() {
@@ -730,6 +764,7 @@ func chatTurnFrom(rec *core.Record) chat.Turn {
 		Owner:          chatOwnerFrom(rec),
 		State:          chat.TurnState(rec.GetString(chatFieldState)),
 		IdempotencyKey: rec.GetString(chatFieldIdempotencyKey),
+		Provider:       rec.GetString(chatFieldProvider),
 		Model:          rec.GetString(chatFieldModel),
 		CreatedAt:      rec.GetDateTime(chatFieldCreatedAt).Time(),
 		UpdatedAt:      rec.GetDateTime(chatFieldUpdatedAt).Time(),
@@ -1312,6 +1347,7 @@ func (s *ChatStore) CreateTurn(ctx context.Context, owner chat.OwnerKey, t chat.
 		rec.Set(chatFieldIdempotencyKey, t.IdempotencyKey)
 		rec.Set(chatFieldIdempotencySlot, slot)
 		rec.Set(chatFieldActiveSlot, t.ConversationID)
+		rec.Set(chatFieldProvider, t.Provider)
 		rec.Set(chatFieldModel, t.Model)
 		rec.Set(chatFieldLastSeq, int64(0))
 		rec.Set(chatFieldDroppedBefore, int64(0))
@@ -1374,6 +1410,25 @@ func (s *ChatStore) GetTurn(_ context.Context, owner chat.OwnerKey, id string) (
 		return chat.Turn{}, err
 	}
 	return chatTurnFrom(rec), nil
+}
+
+// FindTurnByIdempotencyKey implements chat.IdempotentTurnStore.
+func (s *ChatStore) FindTurnByIdempotencyKey(_ context.Context, owner chat.OwnerKey, conversationID, key string) (chat.Turn, bool, error) {
+	if key == "" {
+		return chat.Turn{}, false, nil
+	}
+	params := chatOwnerParams(owner)
+	params[chatFieldConversation] = conversationID
+	params[chatFieldIdempotencyKey] = key
+	rec, err := chatFirst(s.app, s.turns,
+		chatFieldOwnerKey+" = {:ownerKey} && "+chatFieldConversation+" = {:conversation} && "+chatFieldIdempotencyKey+" = {:idempotencyKey}", params)
+	if err != nil {
+		if errors.Is(err, chat.ErrNotFound) {
+			return chat.Turn{}, false, nil
+		}
+		return chat.Turn{}, false, err
+	}
+	return chatTurnFrom(rec), true, nil
 }
 
 func (s *ChatStore) TransitionTurn(ctx context.Context, owner chat.OwnerKey, id string, from, to chat.TurnState, failure *chat.TurnFailed) (chat.Turn, error) {

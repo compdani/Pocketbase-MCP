@@ -97,8 +97,22 @@ export function errorText(error) {
   return GENERIC_TEXT;
 }
 
-/** Model ids for the element's model menu (it takes plain strings too). */
+/**
+ * Model choices for the element's menu. A catalog gives labelled objects; the
+ * legacy single-provider path still yields plain model-id strings.
+ */
 export function modelsFromState(state) {
+  const choices = state && Array.isArray(state.choices) ? state.choices : [];
+  if (choices.length > 0) {
+    return choices
+      .filter((choice) => choice && typeof choice === 'object' && typeof choice.id === 'string' && choice.id !== '')
+      .map((choice) => ({
+        id: choice.id,
+        label: typeof choice.label === 'string' && choice.label !== '' ? choice.label : String(choice.model ?? choice.id),
+        group: typeof choice.group === 'string' && choice.group !== '' ? choice.group : undefined,
+        disabled: choice.disabled === true,
+      }));
+  }
   const models = state && Array.isArray(state.models) ? state.models : [];
   return models.filter((model) => typeof model === 'string' && model !== '');
 }

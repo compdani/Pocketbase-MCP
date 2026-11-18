@@ -37,6 +37,29 @@ examples.
    [verification/MILESTONE-3-REPORT.md](../verification/MILESTONE-3-REPORT.md)),
    and one self-registering client such as Claude Code.
 
+## Chat providers
+
+Managed chat providers add three private collections (`_mcpChatProviders`,
+`_mcpChatProviderAuth`, `_mcpChatSettings`). API keys, header values and
+ChatGPT/Codex credentials are encrypted at rest. Set a 32-character `PB_ENCRYPTION_KEY` (or
+the app's configured encryption env) before adding a provider with a secret;
+without it the settings API refuses to store one. Changing the key makes
+existing stored secrets unreadable: re-enter provider keys and sign in Codex
+again after a rotation.
+
+The settings API is mounted under the chat prefix and is superuser-only. It
+uses its own authenticator, so `Auth.AllowSuperusers` does not have to be on
+for normal chat just to let an administrator manage providers. Normal chat
+users can still see the `choices` in `/status` but can never read a key, header
+value or token.
+
+For a first boot, `MCP_CHAT_PROVIDERS_FILE` can seed a JSON catalog (see
+[`examples/chat-providers.example.json`](../examples/chat-providers.example.json)).
+Keep any file that contains `apiKey` values out of version control and mode
+`0600`; the settings API is the preferred place for later changes. Codex plan
+usage is offered by OpenAI for open-source and locally hosted apps; a paid or
+remotely hosted deployment is expected to apply through OpenAI's interest form.
+
 ## Full session reuse
 
 Tokens issued to an MCP client are ordinary PocketBase session tokens:

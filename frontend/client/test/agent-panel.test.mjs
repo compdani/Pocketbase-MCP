@@ -673,6 +673,21 @@ test('unbind removes every listener and stops writing', async () => {
   assert.equal(page.running, false);
 });
 
+test('modelsFromState returns labelled catalog choices', () => {
+  assert.deepEqual(
+    modelsFromState(
+      stateOf({
+        models: ['m1'],
+        choices: [
+          { id: 'openai::m1', model: 'm1', label: 'Model One', group: 'OpenAI' },
+          { id: '', model: 'ignored' },
+        ],
+      }),
+    ),
+    [{ id: 'openai::m1', label: 'Model One', group: 'OpenAI', disabled: false }],
+  );
+});
+
 test('modelsFromState keeps only model id strings', () => {
   assert.deepEqual(modelsFromState(stateOf({ models: ['a', '', 7, 'b'] })), ['a', 'b']);
   assert.deepEqual(modelsFromState(null), []);

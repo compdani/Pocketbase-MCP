@@ -114,6 +114,14 @@ type Store interface {
 	InterruptRunning(ctx context.Context) (int, error)
 }
 
+// IdempotentTurnStore is an optional lookup that lets a submission return the
+// turn a previous retry already created before it resolves a provider or
+// validates attachments. Stores that index the idempotency key should
+// implement it; the runner and HTTP handler use it when available.
+type IdempotentTurnStore interface {
+	FindTurnByIdempotencyKey(ctx context.Context, owner OwnerKey, conversationID, key string) (Turn, bool, error)
+}
+
 // ActiveTurnStore is an optional fast path for finding a conversation's one
 // non-terminal turn without reading its transcript. Stores that can index the
 // active turn (all bundled stores do) should implement it.

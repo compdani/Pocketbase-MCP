@@ -67,6 +67,8 @@ export interface ChatTurn {
   conversationId: string;
   state: TurnState;
   idempotencyKey?: string;
+  /** Catalog provider id, absent for the legacy single-provider path. */
+  provider?: string;
   model?: string;
   createdAt: string;
   updatedAt: string;
@@ -163,9 +165,24 @@ export interface ChatUpload {
   createdAt: string;
 }
 
+/** One selectable provider/model pair. id is opaque to clients. */
+export interface ChatModelChoice {
+  id: string;
+  provider: string;
+  model: string;
+  label?: string;
+  group?: string;
+  default?: boolean;
+  /** Canonical MIME types this choice can send. */
+  attachmentTypes?: string[];
+}
+
 export interface ChatStatus {
   version: string;
   models: string[];
+  /** Present when the server has a provider catalog. */
+  choices?: ChatModelChoice[];
+  defaultChoice?: string;
   features: ChatFeatures;
   limits: ChatLimits;
 }
@@ -214,6 +231,8 @@ export interface GetConversationOptions extends RequestOptions {
 
 export interface SubmitTurnOptions extends RequestOptions {
   text: string;
+  /** Catalog provider id. Omit to use the default provider. */
+  provider?: string;
   model?: string;
   /** Upload ids returned by uploadFile(). */
   attachments?: string[];

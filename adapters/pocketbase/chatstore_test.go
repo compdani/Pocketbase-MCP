@@ -30,7 +30,11 @@ func newChatTestApp(t *testing.T) core.App {
 
 func newChatTestAppAt(t *testing.T, dataDir string) core.App {
 	t.Helper()
-	app := pocketbase.NewWithConfig(pocketbase.Config{DefaultDataDir: dataDir})
+	t.Setenv("PB_TEST_ENCRYPTION_KEY", strings.Repeat("k", 32))
+	app := pocketbase.NewWithConfig(pocketbase.Config{
+		DefaultDataDir:       dataDir,
+		DefaultEncryptionEnv: "PB_TEST_ENCRYPTION_KEY",
+	})
 	if err := app.Bootstrap(); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
