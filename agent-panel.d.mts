@@ -212,10 +212,13 @@ export declare function renderNoticeEntry(entry: AgentNoticeEntry): unknown;
  */
 export declare function registerProposalEntry(panel: AgentPanelLike): boolean;
 
-/** Model ids for the element's model menu. */
+/**
+ * Model choices for the element's menu. Returns labelled objects when the
+ * controller has catalog choices, otherwise the legacy model-id strings.
+ */
 export declare function modelsFromState(
-  state: Pick<ChatControllerState, 'models'> | null | undefined,
-): string[];
+  state: Pick<ChatControllerState, 'models' | 'choices'> | null | undefined,
+): Array<string | AgentModelChoice>;
 
 /** The page sidebar's `conversations` value. */
 export declare function conversationsFromState(

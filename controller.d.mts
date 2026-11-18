@@ -7,6 +7,7 @@ import type {
   ChatHunkOutcome,
   ChatLimits,
   ChatMessage,
+  ChatModelChoice,
   ChatPart,
   ChatProposal,
   ChatSubmitResult,
@@ -128,7 +129,14 @@ export interface ChatControllerState {
   features: ChatFeatures | null;
   /** /status limits, including attachment types, size and count. */
   limits: ChatLimits | null;
+  /** Legacy flat model list; still populated from /status. */
   models: string[];
+  /** Catalog choices when the server has one. */
+  choices: ChatModelChoice[];
+  /** The server's default catalog choice id, or ''. */
+  defaultChoice: string;
+  /** The picker's current choice id, or ''. */
+  choice: string;
 }
 
 export interface ChatDecideOptions {
@@ -154,6 +162,12 @@ export interface ChatReportOutcomeOptions {
 }
 
 /** Flatten canonical messages into one transcript entry per part. */
+/** Resolve a choice id or model id against /status choices. Pure. */
+export declare function resolveChoice(
+  choices: ChatModelChoice[] | null | undefined,
+  requested?: string,
+): ChatModelChoice | null;
+
 export declare function transcriptFromMessages(messages?: ChatMessage[]): ChatTranscriptEntry[];
 
 /** Merge proposals by id, newest revision wins and no duplicates. */
@@ -208,7 +222,13 @@ export declare class ChatController extends EventTarget {
    */
   send(
     text: string,
-    options?: { model?: string; attachments?: Array<string | Blob | File> },
+    options?: {
+      /** A choice id or a model id; resolved against the catalog. */
+      model?: string;
+      /** Explicit provider id; normally derived from the catalog choice. */
+      provider?: string;
+      attachments?: Array<string | Blob | File>;
+    },
   ): Promise<ChatSubmitResult | null>;
 
   /** Cancel on the server, then drop the local stream. */

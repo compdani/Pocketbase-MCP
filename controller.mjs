@@ -72,7 +72,32 @@ function initialState() {
     features: null,
     limits: null,
     models: [],
+    choices: [],
+    defaultChoice: '',
+    choice: '',
   };
+}
+
+/**
+ * Resolve a picker value or model id to one catalog choice. An opaque choice id
+ * wins, then a unique model id, then the default choice. Returns null when the
+ * server has no catalog (the legacy single-provider path).
+ */
+export function resolveChoice(choices, requested) {
+  if (!Array.isArray(choices) || choices.length === 0) return null;
+  const value = typeof requested === 'string' ? requested : '';
+  if (value !== '') {
+    const exact = choices.find((choice) => choice && choice.id === value);
+    if (exact) return exact;
+    const byModel = choices.filter((choice) => choice && choice.model === value);
+    if (byModel.length === 1) return byModel[0];
+    const fallback = choices.find((choice) => choice && choice.default);
+    if (fallback && fallback.model === value) return fallback;
+    // Never silently change the provider for a value the picker did not
+    // produce. The server can reject an unknown model instead.
+    return null;
+  }
+  return choices.find((choice) => choice && choice.default) ?? choices[0];
 }
 
 /**
@@ -653,9 +678,22 @@ export class ChatController extends EventTarget {
         this._client.listConversations({}),
       ]);
       if (!this._current(epoch)) return this._state;
+      const choices = Array.isArray(status?.choices)
+        ? status.choices.filter((choice) => choice && typeof choice === 'object' && typeof choice.id === 'string')
+        : [];
+      const serverDefault = typeof status?.defaultChoice === 'string' ? status.defaultChoice : '';
+      const defaultChoice = choices.some((choice) => choice.id === serverDefault)
+        ? serverDefault
+        : choices.find((choice) => choice.default)?.id ?? '';
+      const currentChoice = choices.some((choice) => choice.id === this._state.choice)
+        ? this._state.choice
+        : defaultChoice;
       this._set({
         status: 'ready',
         models: Array.isArray(status?.models) ? status.models : [],
+        choices,
+        defaultChoice,
+        choice: currentChoice,
         features: status?.features && typeof status.features === 'object' ? status.features : null,
         limits: status?.limits && typeof status.limits === 'object' ? status.limits : null,
         conversations: Array.isArray(page?.items) ? page.items : [],
@@ -1254,7 +1292,7 @@ export class ChatController extends EventTarget {
     return this._track(this._send(text, options));
   }
 
-  async _send(text, { model, attachments } = {}) {
+  async _send(text, { model, provider, attachments } = {}) {
     const conversationId = this._state.activeConversationId;
     if (!conversationId) {
       throw new Error('ChatController.send() requires an open conversation');
@@ -1264,6 +1302,12 @@ export class ChatController extends EventTarget {
     }
     if (this._disposed) return null;
 
+    const selected = resolveChoice(this._state.choices, model ?? this._state.choice);
+    if (selected) {
+      provider = selected.provider;
+      model = selected.model;
+      this._set({ choice: selected.id });
+    }
     const epoch = this._epoch;
     let attachmentIds = [];
     if (Array.isArray(attachments) && attachments.length > 0) {
@@ -1279,6 +1323,7 @@ export class ChatController extends EventTarget {
       try {
         result = await this._client.submitTurn(conversationId, {
           text,
+          provider,
           model,
           attachments: attachmentIds.length > 0 ? attachmentIds : undefined,
           idempotencyKey,

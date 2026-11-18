@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ChatController, accountKeyOf } from '../controller.mjs';
+import { ChatController, accountKeyOf, resolveChoice } from '../controller.mjs';
 import { ChatApiError, ChatNetworkError, ResyncRequiredError } from '../client.mjs';
 import { GapError } from '../reducer.mjs';
 import {
+  STATUS,
   detail,
   event,
   makeClient,
@@ -54,6 +55,47 @@ test('init loads status, models, limits and the first conversation page', async 
   assert.deepEqual(controller.state.conversations.map((c) => c.id), ['c1']);
   assert.equal(controller.state.nextCursor, 'page-2');
   assert.ok(changes.length >= 2, 'loading and ready both emit change');
+});
+
+test('init loads catalog choices and send resolves provider and model', async () => {
+  const client = makeClient();
+  client.statusResult = {
+    ...STATUS,
+    models: ['m1'],
+    choices: [
+      { id: 'openai::m1', provider: 'openai', model: 'm1', label: 'Model One', group: 'OpenAI', default: true },
+    ],
+    defaultChoice: 'openai::m1',
+  };
+  client.detailResult = detail(conversation('c1'), []);
+  client.submitResult = { turn: turn('queued'), created: true };
+  client.streamTurn = async () => ({ lastSeq: 0, terminal: true });
+
+  const controller = new ChatController({ client });
+  await controller.init();
+  assert.deepEqual(controller.state.choices.map((c) => c.id), ['openai::m1']);
+  assert.equal(controller.state.defaultChoice, 'openai::m1');
+  assert.equal(controller.state.choice, 'openai::m1');
+
+  await controller.open('c1');
+  await controller.send('hello', { model: 'openai::m1' });
+  await settle(controller);
+
+  const submit = client.calls.find((c) => c.method === 'submitTurn');
+  assert.equal(submit.options.provider, 'openai');
+  assert.equal(submit.options.model, 'm1');
+  assert.equal(controller.state.choice, 'openai::m1');
+});
+
+test('resolveChoice does not silently switch an unknown picker value', () => {
+  const choices = [
+    { id: 'a::m1', provider: 'a', model: 'm1', default: true },
+    { id: 'b::m2', provider: 'b', model: 'm2' },
+  ];
+  assert.equal(resolveChoice(choices, 'b::m2')?.provider, 'b');
+  assert.equal(resolveChoice(choices, 'm2')?.provider, 'b');
+  assert.equal(resolveChoice(choices, 'missing'), null);
+  assert.equal(resolveChoice(choices, '')?.provider, 'a');
 });
 
 test('init surfaces an API error in state instead of throwing', async () => {

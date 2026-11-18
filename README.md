@@ -32,7 +32,7 @@ const chat = new ChatController({
 chat.addEventListener('change', () => render(chat.state));
 await chat.init();
 await chat.open('conversation-id');
-await chat.send('Hello', { model: 'gpt-4.1' });
+await chat.send('Hello', { model: chat.state.choice || 'gpt-4.1' });
 ```
 
 `chat.state` is an immutable snapshot:
@@ -48,13 +48,26 @@ await chat.send('Hello', { model: 'gpt-4.1' });
   turn,            // TurnView | null: live text, tools, usage, proposals, lastSeq
   running, error,
   features,        // { proposals, uploads } from /status
-  limits, models,
+  limits, models,  // models is the legacy flat list
+  choices,         // ChatModelChoice[]: provider/model pairs from /status
+  defaultChoice,   // the server's default choice id
+  choice,          // the picker's current choice id
 }
 ```
 
 Call `chat.setAccount({ appUrl, mount, authCollectionId, userId })` whenever the
 signed-in user can change. A different key aborts in-flight requests, clears all
 state and reloads, so one user's data is never shown to another.
+
+## Provider choices
+
+With a provider catalog, `/status` returns labelled `choices` such as
+`{ id: "codex-work::gpt-5-codex", provider: "codex-work", model: "gpt-5-codex",
+label: "GPT-5 Codex", group: "Codex (work plan)" }`. The controller keeps them
+in `state.choices`, sets `state.choice` to the server default, and resolves the
+picker's value to `{ provider, model }` on `send()`. A choice id is opaque;
+`agent-panel` receives labelled objects and emits the chosen id. Without a
+catalog the old `models` strings and a plain `model` value still work.
 
 ## API
 
@@ -68,7 +81,7 @@ state and reloads, so one user's data is never shown to another.
 | `getConversation(id, { limit, cursor })` | `GET /conversations/{id}` |
 | `renameConversation(id, title)` | `PATCH /conversations/{id}` |
 | `deleteConversation(id)` | `DELETE /conversations/{id}` |
-| `submitTurn(id, { text, model, attachments, idempotencyKey })` | `POST /conversations/{id}/turns` |
+| `submitTurn(id, { text, provider, model, attachments, idempotencyKey })` | `POST /conversations/{id}/turns` |
 | `getTurn(id)` | `GET /turns/{id}` |
 | `cancelTurn(id)` | `POST /turns/{id}/cancel` |
 | `streamTurn(id, { after, signal, onEvent, onHeartbeat })` | `GET /turns/{id}/events` |
@@ -270,7 +283,7 @@ Events handled:
 
 | Element event | Action |
 |---|---|
-| `agent-submit` | `controller.send(text, { model, attachments })`, where `detail.attachments[].file` becomes the File list. Files are uploaded first; the event is cancelled so the chips survive until the turn is accepted, then they are removed. A failure keeps the chips (with an error state) and restores the draft. With no open conversation, one is created first (`options.autoCreate = false` disables that). |
+| `agent-submit` | `controller.send(text, { model, attachments })`, where `detail.model` is a choice id (or a model id) and `detail.attachments[].file` becomes the File list. Files are uploaded first; the event is cancelled so the chips survive until the turn is accepted, then they are removed. A failure keeps the chips (with an error state) and restores the draft. With no open conversation, one is created first (`options.autoCreate = false` disables that). |
 | `agent-action` (`proposal-decision`) | `controller.decide(id, decision)`; the buttons in a proposal card emit this. A failure is shown in the panel's error banner. |
 | `agent-action` (`attachment-download`) | Downloads one attachment, for a host-drawn chip. |
 | `agent-reference-open` | Downloads an attachment chip (`type: 'attachment'`); other references are left to the host. |
