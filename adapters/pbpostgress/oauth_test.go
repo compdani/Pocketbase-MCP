@@ -38,6 +38,17 @@ func newForkOAuthApp(t *testing.T) core.App {
 	if err := app.Bootstrap(); err != nil {
 		t.Fatal(err)
 	}
+	// The fork logs each handled request from a fire-and-forget goroutine,
+	// and that goroutine reads the app settings. Tests share one database (and
+	// sometimes run several apps at once) while settings are written, so the
+	// async logger is a data race that has nothing to do with what these tests
+	// assert. MaxDays = 0 turns the activity logger off at its source.
+	if app.Settings().Logs.MaxDays != 0 {
+		app.Settings().Logs.MaxDays = 0
+		if err := app.Save(app.Settings()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Cleanup(func() { app.ResetBootstrapState() })
 	return app
 }

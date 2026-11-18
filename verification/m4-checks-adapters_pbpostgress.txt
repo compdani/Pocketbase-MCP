@@ -1,1 +1,0 @@
-ok  	github.com/compdani/pocketbase-mcp/adapters/pbpostgress	7.382s

@@ -1,6 +1,6 @@
 // Package stockoauth is the module-owned OAuth2 authorization server for
 // stock PocketBase (ported from customjs authentication/oauth.go, hardened
-// per MCP-SERVER-MODULE-PLAN section 3). It lives in its own nested module
+// per docs/mcp-server.md, "Stock OAuth"). It lives in its own nested module
 // because the root module is stdlib-only and this provider needs PocketBase,
 // while the fork adapter must never compile it (duplicate OAuth ownership).
 package stockoauth

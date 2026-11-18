@@ -1,5 +1,7 @@
 # Milestone 4 — Fork OAuth
 
+> Raw command logs named here (`checks-*.txt`, `m4-*.txt`) are kept locally in `verification/` and are not tracked in git (2026-11-17).
+
 Date: 2026-11-17. Implementation and verification report.
 
 ## Branch and commits

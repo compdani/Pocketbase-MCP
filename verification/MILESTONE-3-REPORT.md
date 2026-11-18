@@ -1,5 +1,7 @@
 # Milestone 3 verification report
 
+> Raw command logs named here (`checks-*.txt`, `m4-*.txt`) are kept locally in `verification/` and are not tracked in git (2026-11-17).
+
 Verification date: 2026-11-17. No live ChatGPT connection attempted. Reference customjs, pb-postgress, and plan documents were not modified. No go.work or runtime dependencies were added.
 
 ## Scope status

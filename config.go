@@ -95,6 +95,16 @@ func (p CollectionPreset) AliasOrName() string {
 }
 
 // ToolSpec is a custom tool registered by Go code (registry hook).
+//
+// ExecutionLocation "" or "server" means the tool's handler runs here.
+// "editor" means the tool is a chat-only draft patch: the model's call becomes
+// an editor proposal, approval authorizes the user's browser to apply it
+// locally, and the browser reports applied/stale/failed. An editor tool must
+// declare Channels "chat", leave Handler nil, leave Approval "", classify as a
+// write (which it always is: Effects.Kind may stay empty) and declare an object
+// InputSchema that requires the string properties "editorId" and
+// "baseRevision". It is offered only when chat proposals are enabled and never
+// needs Config.AllowWrites, because it writes nothing on the server.
 type ToolSpec struct {
 	Name              string
 	Title             string
@@ -109,7 +119,14 @@ type ToolSpec struct {
 	ExecutionLocation string
 	Timeout           time.Duration
 	MaxResponseBytes  int64
-	Handler           func(ctx context.Context, call CallContext, args map[string]any) (any, error)
+	// Approval selects the review policy for a write tool offered on chat.
+	// "" (the default) means every chat call becomes a proposal the user must
+	// approve; "auto" lets the host run it without review when its chat
+	// options also enable auto-approval. It never widens AllowWrites, the
+	// tool's policy or PocketBase rules, and it is invalid on a read tool or
+	// on an editor tool, whose every change needs review.
+	Approval string
+	Handler  func(ctx context.Context, call CallContext, args map[string]any) (any, error)
 }
 
 // Config configures a Server. Zero values get documented defaults.

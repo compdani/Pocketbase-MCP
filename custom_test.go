@@ -35,8 +35,7 @@ func TestValidateCustomTools(t *testing.T) {
 		{"bad channels", ToolSpec{Name: "x", Channels: "sms", Handler: okHandler}, "invalid channels"},
 		{"editor on mcp", ToolSpec{Name: "x", ExecutionLocation: "editor", Handler: okHandler}, "editor"},
 		{"editor on both", ToolSpec{Name: "x", Channels: "both", ExecutionLocation: "editor", Handler: okHandler}, "editor"},
-		{"chat only", ToolSpec{Name: "x", Channels: "chat", Handler: okHandler}, "chat channel isn't available yet"},
-		{"chat-only editor", ToolSpec{Name: "x", Channels: "chat", ExecutionLocation: "editor", Handler: okHandler}, "chat channel isn't available yet"},
+		{"chat-only editor", ToolSpec{Name: "x", Channels: "chat", ExecutionLocation: "editor", Handler: okHandler}, "editor"},
 		{"bad location", ToolSpec{Name: "x", ExecutionLocation: "browser", Handler: okHandler}, "invalid execution location"},
 		{"timeout too big", ToolSpec{Name: "x", Timeout: time.Hour, Handler: okHandler}, "exceeds server maximum"},
 		{"unsupported schema", ToolSpec{Name: "x", InputSchema: map[string]any{"type": "object", "oneOf": []any{}}, Handler: okHandler}, "unsupported keyword"},
@@ -48,9 +47,14 @@ func TestValidateCustomTools(t *testing.T) {
 			t.Errorf("%s: got %v, want error containing %q", c.name, err, c.want)
 		}
 	}
-	// "both" is accepted: it works over MCP now and chat will share it later.
+	// "both" is accepted: it works over MCP and chat shares it.
 	if err := base(ToolSpec{Name: "shared", Channels: "both", Handler: okHandler}).ValidateCustomTools(); err != nil {
 		t.Fatalf("both-channel tool rejected: %v", err)
+	}
+	// "chat" is accepted now that the chat surface exists; editor execution is
+	// still refused for it (that is v1.2).
+	if err := base(ToolSpec{Name: "chatty", Channels: "chat", Handler: okHandler}).ValidateCustomTools(); err != nil {
+		t.Fatalf("chat-channel tool rejected: %v", err)
 	}
 	// Duplicate custom names are a startup error.
 	if err := base(valid, valid).ValidateCustomTools(); err == nil {

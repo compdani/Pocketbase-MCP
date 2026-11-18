@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PocketBase MCP chat — plain JS demo</title>
+  <link rel="stylesheet" href="./app.css" />
+</head>
+<body>
+  <section id="login" class="login" aria-labelledby="login-title">
+    <h1 id="login-title">PocketBase MCP chat</h1>
+    <p class="muted">
+      Local development demo. It talks to PocketBase through this dev server
+      (<code>/api/</code> is proxied), and the offline <code>demo</code> provider
+      answers the messages.
+    </p>
+    <form id="login-form">
+      <label>
+        Email
+        <input id="identity" name="identity" type="email" value="demo@example.com"
+               autocomplete="username" required />
+      </label>
+      <label>
+        Password
+        <input id="password" name="password" type="password"
+               autocomplete="current-password" required />
+      </label>
+      <button id="login-button" type="submit">Log in</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </section>
+
+  <main id="app" hidden>
+    <header class="topbar">
+      <span class="muted">Signed in as <strong id="who"></strong></span>
+      <button type="button" id="logout">Log out</button>
+    </header>
+    <div id="workspace">
+      <aside id="note" class="note" aria-labelledby="note-title">
+        <h2 id="note-title">Demo note</h2>
+        <p class="note-meta muted">
+          Revision <strong id="note-revision">0</strong> · editor <code>demo-note</code>
+        </p>
+        <textarea id="note-text" aria-label="Note text"
+                  placeholder="The note is empty."></textarea>
+        <p class="note-help muted">
+          Ask the assistant to edit it with
+          <code>edit rev:&lt;n&gt; new text</code>. Approving the change applies
+          the draft here; nothing is saved.
+        </p>
+      </aside>
+      <agent-page id="page"></agent-page>
+    </div>
+  </main>
+
+  <script type="module" src="./app.mjs"></script>
+</body>
+</html>

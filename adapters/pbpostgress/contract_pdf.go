@@ -61,7 +61,7 @@ func ContractPDFTool(app core.App, collection, field string, maxBytes int64) pbm
 			}
 			defer fs.Close()
 			key := col.Id + "/" + id + "/" + filename
-			reader, err := fs.GetFile(key)
+			reader, err := fs.GetReader(key)
 			if err != nil {
 				return nil, err
 			}

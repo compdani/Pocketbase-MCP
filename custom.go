@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 	"time"
 
@@ -14,6 +13,10 @@ import (
 )
 
 type AuditEvent struct {
+	// Channel is the invocation surface that emitted the event: "mcp" or
+	// "chat". The same tool called through either surface is audited the same
+	// way apart from this field.
+	Channel             string
 	PrincipalID         string
 	PrincipalCollection string
 	Tool                string
@@ -31,7 +34,14 @@ type AuditEvent struct {
 
 // writeEffect reports whether the tool performs writes (Effects.Kind wins,
 // the deprecated Write bool is honoured when Kind is unset).
+//
+// An editor tool is always a write: its effect is a draft patch the browser
+// applies after approval. It writes nothing on the server, so it is a write for
+// review purposes only and Config.AllowWrites never gates it.
 func (t ToolSpec) writeEffect() bool {
+	if t.executionLocation() == "editor" {
+		return true
+	}
 	return t.Write || t.Effects.Kind == "write"
 }
 
@@ -50,6 +60,30 @@ func (t ToolSpec) effectKind() string {
 // (Channels defaults to "mcp").
 func (t ToolSpec) onMCPChannel() bool {
 	return t.Channels == "" || t.Channels == "mcp" || t.Channels == "both"
+}
+
+// onChatChannel reports whether the tool declares the chat channel. An empty
+// Channels value means "mcp", never chat.
+func (t ToolSpec) onChatChannel() bool {
+	return t.Channels == "chat" || t.Channels == "both"
+}
+
+// approvalAuto reports whether the host may run the tool without review when
+// its chat options also enable auto-approval. The default is review.
+func (t ToolSpec) approvalAuto() bool { return t.Approval == "auto" }
+
+// executionLocation normalizes the declared execution location to "server".
+func (t ToolSpec) executionLocation() string {
+	if t.ExecutionLocation == "" {
+		return "server"
+	}
+	return t.ExecutionLocation
+}
+
+// editorTool reports whether the tool's effect is a draft patch the browser
+// applies, rather than a server-side call.
+func (t ToolSpec) editorTool() bool {
+	return t.executionLocation() == "editor"
 }
 
 func redactAuditValue(key string, v any) any {
@@ -108,6 +142,9 @@ type CollectionAccess struct {
 	server    *Server
 	principal Principal
 	base      string
+	// channel is the invocation surface this access was built for ("mcp" or
+	// "chat"); it labels the audit events.
+	channel string
 	// writes is true only for tools that declare a write effect; read tools
 	// can't create, update or delete through the facade.
 	writes bool
@@ -125,7 +162,7 @@ func (a *CollectionAccess) Call(ctx context.Context, collection, action string, 
 		if err != nil {
 			outcome = AuditOutcome(err)
 		}
-		a.server.emitAudit(a.principal, a.tool, "", collection, action, outcome, start, a.requestID, a.server.auditPayload(args))
+		a.server.emitAudit(a.channel, a.principal, a.tool, "", collection, action, outcome, start, a.requestID, a.server.auditPayload(args))
 	}()
 	cfg, ok := a.server.host.LookupCollection(collection)
 	if !ok {
@@ -170,8 +207,8 @@ func (c Config) ValidateCustomTools() error {
 			return fmt.Errorf("custom tool: name is required")
 		}
 		names = append(names, t.Name)
-		if t.Handler == nil {
-			return fmt.Errorf("tool %q: missing handler", t.Name)
+		if err := validateToolExecution(t); err != nil {
+			return err
 		}
 		if err := ValidatePolicyName(t.Policy, c.Policies); err != nil {
 			return fmt.Errorf("tool %q: %w", t.Name, err)
@@ -180,23 +217,21 @@ func (c Config) ValidateCustomTools() error {
 			return fmt.Errorf("tool %q: invalid effect %q (want read or write)", t.Name, t.Effects.Kind)
 		}
 		switch t.Channels {
-		case "", "mcp", "both":
-		case "chat":
-			// Nothing serves the chat channel yet; accepting the tool would
-			// silently do nothing now and make it reachable later under
-			// rules that don't exist yet. Use "both" for tools chat will share.
-			return fmt.Errorf("tool %q: the chat channel isn't available yet (use \"mcp\" or \"both\")", t.Name)
+		case "", "mcp", "both", "chat":
+			// "chat" is served by the read-only chat surface (v1.1) plus the
+			// proposal surface (v1.2). A chat tool is never listed or callable
+			// over MCP. Editor tools are chat-only and validated above.
 		default:
-			return fmt.Errorf("tool %q: invalid channels %q (want mcp or both)", t.Name, t.Channels)
+			return fmt.Errorf("tool %q: invalid channels %q (want mcp, chat or both)", t.Name, t.Channels)
 		}
-		switch t.ExecutionLocation {
-		case "", "server":
-		case "editor":
-			// Editor tools run in the browser and belong to the chat plan
-			// (proposals and approval); MCP clients can't run them.
-			return fmt.Errorf("tool %q: execution location \"editor\" isn't supported yet (MCP tools run on the server)", t.Name)
+		switch t.Approval {
+		case "":
+		case "auto":
+			if !t.writeEffect() {
+				return fmt.Errorf("tool %q: approval \"auto\" requires a write effect", t.Name)
+			}
 		default:
-			return fmt.Errorf("tool %q: invalid execution location %q (want server)", t.Name, t.ExecutionLocation)
+			return fmt.Errorf("tool %q: invalid approval %q (want auto)", t.Name, t.Approval)
 		}
 		if t.Timeout < 0 || t.Timeout > c.MaxToolTimeout || t.MaxResponseBytes < 0 || t.MaxResponseBytes > c.MaxResponseBytes {
 			return fmt.Errorf("tool %q: timeout/response limit exceeds server maximum", t.Name)
@@ -214,18 +249,142 @@ func (c Config) ValidateCustomTools() error {
 	}
 	return c.EffectiveManifest().ValidateStructural(c.Policies, names)
 }
-func (s *Server) customAllowed(p Principal, t ToolSpec) bool {
+
+// validateToolExecution enforces the location-specific contract. A server tool
+// runs here and needs a handler. An editor tool is a chat-only draft patch: it
+// has no server handler at all, every change is reviewed, and its schema names
+// the editor and revision the patch was computed against.
+func validateToolExecution(t ToolSpec) error {
+	switch t.executionLocation() {
+	case "server":
+		if t.Handler == nil {
+			return fmt.Errorf("tool %q: missing handler", t.Name)
+		}
+		return nil
+	case "editor":
+		return validateEditorTool(t)
+	default:
+		return fmt.Errorf("tool %q: invalid execution location %q (want server or editor)", t.Name, t.ExecutionLocation)
+	}
+}
+
+// validateEditorTool enforces the editor ToolSpec contract:
+//
+//   - Channels is exactly "chat": an MCP client cannot run a browser action.
+//   - Handler is nil: nothing about the tool runs on the server.
+//   - Approval is "" (the default review): an editor patch always needs the
+//     user's approval before the browser may apply it.
+//   - The effect is a write. Effects.Kind may be empty, because an editor tool
+//     is a write by definition; a declared "read" is refused.
+//   - InputSchema is an object that REQUIRES string properties "editorId" (the
+//     editor/document the patch targets) and "baseRevision" (the editor
+//     revision the patch was computed against).
+func validateEditorTool(t ToolSpec) error {
+	if t.Channels != "chat" {
+		return fmt.Errorf("tool %q: an editor tool is chat-only and must declare channels \"chat\" (an MCP client cannot run a browser editor action)", t.Name)
+	}
+	if t.Handler != nil {
+		return fmt.Errorf("tool %q: an editor tool cannot declare a handler; its effect is a draft patch the browser applies", t.Name)
+	}
+	if t.Approval != "" {
+		return fmt.Errorf("tool %q: an editor tool cannot declare approval %q; every editor change needs review", t.Name, t.Approval)
+	}
+	if t.Effects.Kind == "read" {
+		return fmt.Errorf("tool %q: an editor tool is a write effect; remove Effects.Kind \"read\"", t.Name)
+	}
+	return validateEditorSchema(t)
+}
+
+// validateEditorSchema requires the two properties every editor patch binds.
+// Without them a proposal could not say which document it edits or which
+// revision it was computed against, so it could never be applied safely.
+func validateEditorSchema(t ToolSpec) error {
+	if t.InputSchema == nil {
+		return fmt.Errorf("tool %q: an editor tool requires an input schema of type object with required string properties \"editorId\" and \"baseRevision\"", t.Name)
+	}
+	if typ, _ := t.InputSchema["type"].(string); typ != "object" {
+		return fmt.Errorf("tool %q: an editor tool's input schema must be of type object", t.Name)
+	}
+	props, _ := t.InputSchema["properties"].(map[string]any)
+	for _, field := range []string{"editorId", "baseRevision"} {
+		prop, ok := props[field].(map[string]any)
+		if !ok {
+			return fmt.Errorf("tool %q: an editor tool's input schema must declare a %q property", t.Name, field)
+		}
+		if typ, _ := prop["type"].(string); typ != "string" {
+			return fmt.Errorf("tool %q: editor property %q must be a string", t.Name, field)
+		}
+		if !schemaRequires(t.InputSchema, field) {
+			return fmt.Errorf("tool %q: an editor tool's input schema must require %q", t.Name, field)
+		}
+	}
+	return nil
+}
+
+// schemaRequires reports whether a JSON-schema object lists field in required.
+// The schema is a decoded map, so required may be []string (built in Go) or
+// []any (decoded from JSON).
+func schemaRequires(sch map[string]any, field string) bool {
+	switch req := sch["required"].(type) {
+	case []string:
+		for _, name := range req {
+			if name == field {
+				return true
+			}
+		}
+	case []any:
+		for _, v := range req {
+			if name, ok := v.(string); ok && name == field {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// customAllowedOnChannel applies the tool gate for one channel. Chat only
+// offers custom tools that declare that channel and have a read effect; the
+// chat-writes variant additionally offers a write-effect tool when the host
+// enabled proposals and writes, and policy still applies. The variant is
+// internal: no request can ask for it. MCP keeps its existing rule (mcp/both
+// channels, writes need AllowWrites).
+//
+// An editor tool is its own case: it is chat-only and offered exactly when the
+// chat-writes variant is on (which requires ChatOptions.Proposals). It writes
+// nothing on the server, so Config.AllowWrites does not gate it; policy does.
+func (s *Server) customAllowedOnChannel(p Principal, t ToolSpec, channel string, chatWrites bool) bool {
+	if t.editorTool() {
+		return channel == "chat" && t.onChatChannel() && chatWrites && EvaluatePolicy(t.Policy, p, s.cfg.Policies)
+	}
+	if channel == "chat" {
+		if !t.onChatChannel() {
+			return false
+		}
+		if t.writeEffect() && !(chatWrites && s.cfg.AllowWrites) {
+			return false
+		}
+		return EvaluatePolicy(t.Policy, p, s.cfg.Policies)
+	}
 	return t.onMCPChannel() && (!t.writeEffect() || s.cfg.AllowWrites) && EvaluatePolicy(t.Policy, p, s.cfg.Policies)
 }
-func (s *Server) callCustom(w http.ResponseWriter, r *http.Request, p Principal, id any, t ToolSpec, args map[string]any) {
+
+// customToolTimeoutMessage is the user-safe text of a custom tool whose handler
+// outlived its deadline. It is a named constant because a proposal executor has
+// to recognize it: after dispatch, a timeout may still have applied.
+const customToolTimeoutMessage = "Tool execution timed out."
+
+// callCustom runs one custom tool and returns its outcome without touching a
+// ResponseWriter. The writer (callTool's caller) keeps the MCP wire shape.
+func (s *Server) callCustom(ctx context.Context, p Principal, baseURL, channel string, t ToolSpec, args map[string]any, requestID any) (any, string, *protocol.Error) {
 	start := time.Now()
 	outcome := "error"
-	requestID := fmt.Sprint(id)
-	defer func() {
+	requestIDStr := requestIDString(requestID)
+	audit := func() {
 		if s.cfg.AuditFunc != nil {
-			s.cfg.AuditFunc(AuditEvent{PrincipalID: p.ID, PrincipalCollection: p.CollectionName, Tool: t.Name, Effect: t.effectKind(), Outcome: outcome, Duration: time.Since(start), RequestID: requestID, Payload: s.auditPayload(args)})
+			s.cfg.AuditFunc(AuditEvent{Channel: channel, PrincipalID: p.ID, PrincipalCollection: p.CollectionName, Tool: t.Name, Effect: t.effectKind(), Outcome: outcome, Duration: time.Since(start), RequestID: requestIDStr, Payload: s.auditPayload(args)})
 		}
-	}()
+	}
+	defer audit()
 	inputSchema := t.InputSchema
 	if inputSchema == nil {
 		inputSchema = map[string]any{"type": "object", "properties": map[string]any{}}
@@ -236,16 +395,15 @@ func (s *Server) callCustom(w http.ResponseWriter, r *http.Request, p Principal,
 	}
 	if e != nil {
 		outcome = "invalid"
-		writeJSONRPCError(w, 200, id, protocol.CodeInvalidParams, "Invalid params", e.Error())
-		return
+		return nil, "", &protocol.Error{Code: protocol.CodeInvalidParams, Message: "Invalid params", Data: e.Error()}
 	}
 	timeout := t.Timeout
 	if timeout == 0 {
 		timeout = s.cfg.MaxToolTimeout
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	call := CallContext{Principal: p, Access: &CollectionAccess{server: s, principal: p, base: s.baseURL(r), writes: t.writeEffect(), tool: t.Name, requestID: id}, RequestID: requestID, Context: ctx, Logger: s.cfg.Logger, Audit: s.cfg.AuditFunc}
+	call := CallContext{Principal: p, Access: &CollectionAccess{server: s, principal: p, base: baseURL, channel: channel, writes: t.writeEffect(), tool: t.Name, requestID: requestID}, RequestID: requestIDStr, Context: ctx, Logger: s.cfg.Logger, Audit: s.cfg.AuditFunc}
 	type result struct {
 		value any
 		err   error
@@ -256,32 +414,27 @@ func (s *Server) callCustom(w http.ResponseWriter, r *http.Request, p Principal,
 	select {
 	case <-ctx.Done():
 		outcome = "timeout"
-		writeToolError(w, id, "Tool execution timed out.")
-		return
+		return nil, customToolTimeoutMessage, nil
 	case res = <-done:
 	}
 	if res.err != nil {
 		if ctx.Err() != nil {
 			outcome = "timeout"
-			writeToolError(w, id, "Tool execution timed out.")
-			return
+			return nil, customToolTimeoutMessage, nil
 		}
 		// ToolErrors and AccessErrors are user-safe by construction (facade
 		// not-found, PB rule rejections); everything else is sanitized so
 		// handler details (and anything they embed) never leak.
 		if msg, ok := UserMessage(res.err); ok {
 			outcome = AuditOutcome(res.err)
-			writeToolError(w, id, msg)
-			return
+			return nil, msg, nil
 		}
-		s.cfg.Logger.Error("custom tool failed", "tool", t.Name, "requestId", requestID, "error", res.err)
-		writeToolError(w, id, "Tool execution failed.")
-		return
+		s.cfg.Logger.Error("custom tool failed", "tool", t.Name, "requestId", requestIDStr, "error", res.err)
+		return nil, "Tool execution failed.", nil
 	}
 	if ctx.Err() != nil {
 		outcome = "timeout"
-		writeToolError(w, id, "Tool execution timed out.")
-		return
+		return nil, customToolTimeoutMessage, nil
 	}
 	value := res.value
 	tr, ok := value.(protocol.ToolResult)
@@ -294,14 +447,12 @@ func (s *Server) callCustom(w http.ResponseWriter, r *http.Request, p Principal,
 			e = sc.Validate(tr.StructuredContent)
 		}
 		if e != nil {
-			writeToolError(w, id, "Tool output failed validation.")
-			return
+			return nil, "Tool output failed validation.", nil
 		}
 	}
 	text, e := json.Marshal(tr.StructuredContent)
 	if e != nil {
-		writeToolError(w, id, "Tool execution failed.")
-		return
+		return nil, "Tool execution failed.", nil
 	}
 	tr.Content = append([]any{protocol.ToolContent{Type: "text", Text: string(text)}}, tr.Content...)
 	b, e := json.Marshal(tr)
@@ -310,16 +461,27 @@ func (s *Server) callCustom(w http.ResponseWriter, r *http.Request, p Principal,
 		limit = s.cfg.MaxResponseBytes
 	}
 	if e != nil || int64(len(b)) > limit {
-		writeToolError(w, id, "Tool response exceeds limit.")
-		return
+		return nil, "Tool response exceeds limit.", nil
 	}
 	outcome = "ok"
-	writeJSONRPCResult(w, id, tr)
+	return tr, "", nil
 }
 
-func (s *Server) emitAudit(p Principal, tool, effect, collection, action, outcome string, start time.Time, id any, payload map[string]any) {
+// requestIDString renders an audit request id. A missing id (chat calls carry
+// no JSON-RPC id) is the empty string rather than "<nil>".
+func requestIDString(id any) string {
+	if id == nil {
+		return ""
+	}
+	return fmt.Sprint(id)
+}
+
+func (s *Server) emitAudit(channel string, p Principal, tool, effect, collection, action, outcome string, start time.Time, id any, payload map[string]any) {
 	if s.cfg.AuditFunc == nil {
 		return
+	}
+	if channel == "" {
+		channel = "mcp"
 	}
 	if effect == "" {
 		effect = "read"
@@ -327,5 +489,5 @@ func (s *Server) emitAudit(p Principal, tool, effect, collection, action, outcom
 			effect = "write"
 		}
 	}
-	s.cfg.AuditFunc(AuditEvent{PrincipalID: p.ID, PrincipalCollection: p.CollectionName, Tool: tool, Effect: effect, Collection: collection, Action: action, Outcome: outcome, Duration: time.Since(start), RequestID: fmt.Sprint(id), Payload: payload})
+	s.cfg.AuditFunc(AuditEvent{Channel: channel, PrincipalID: p.ID, PrincipalCollection: p.CollectionName, Tool: tool, Effect: effect, Collection: collection, Action: action, Outcome: outcome, Duration: time.Since(start), RequestID: requestIDString(id), Payload: payload})
 }

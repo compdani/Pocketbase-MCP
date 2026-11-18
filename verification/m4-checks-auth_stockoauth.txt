@@ -1,1 +1,0 @@
-ok  	github.com/compdani/pocketbase-mcp/auth/stockoauth	0.215s

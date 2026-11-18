@@ -3,6 +3,8 @@ package pocketbasemcp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -200,7 +202,7 @@ func (s *Server) ServeWithPrincipal(w http.ResponseWriter, r *http.Request, p Pr
 	case "ping":
 		writeJSONRPCResult(w, req.ID, map[string]any{})
 	case "tools/list":
-		writeJSONRPCResult(w, req.ID, map[string]any{"tools": s.toolList(p)})
+		writeJSONRPCResult(w, req.ID, map[string]any{"tools": s.listTools(p, "mcp")})
 	case "tools/call":
 		s.handleToolCall(w, r, p, req.ID, req.Params)
 	case "resources/list":
@@ -304,7 +306,27 @@ func (s *Server) dataSchemaFor(cfg *CollectionConfig, op string) map[string]any 
 	return map[string]any{"type": "object", "properties": props, "additionalProperties": false, "description": "Field values keyed by field name. Relations take record ids. File fields cannot be set through MCP."}
 }
 
-func (s *Server) toolList(p Principal) []protocol.ToolDefinition {
+// listTools returns the tools offered on one invocation channel. Channel "mcp"
+// is the full surface; channel "chat" is the v1.1 read-only subset: discovery,
+// search and fetch tools plus custom tools that declare the chat channel and a
+// read effect. Write tools and mcp-only custom tools never appear there.
+func (s *Server) listTools(p Principal, channel string) []protocol.ToolDefinition {
+	return s.listToolsWithWrites(p, channel, false)
+}
+
+// listChatTools is the internal chat listing variant. writes additionally
+// offers write tools the host enabled for chat review: custom write tools that
+// declare the chat channel, and the generated collection write tools that MCP
+// would list for this caller. It is never reachable from a request, because no
+// wire channel names it; callTool's chat gate uses the same variant so listing
+// and calling can never disagree.
+func (s *Server) listChatTools(p Principal, writes bool) []protocol.ToolDefinition {
+	return s.listToolsWithWrites(p, "chat", writes)
+}
+
+func (s *Server) listToolsWithWrites(p Principal, channel string, writes bool) []protocol.ToolDefinition {
+	chat := channel == "chat"
+	chatWrites := chat && writes
 	visible := s.callerVisibleCollections(p)
 	names := make([]string, 0, len(visible))
 	for _, c := range visible {
@@ -312,7 +334,7 @@ func (s *Server) toolList(p Principal) []protocol.ToolDefinition {
 	}
 	tools := []protocol.ToolDefinition{describeAccessToolDefinition(), describeToolDefinition(names)}
 	for _, ct := range s.cfg.CustomTools {
-		if !s.customAllowed(p, ct) {
+		if !s.customAllowedOnChannel(p, ct, channel, chatWrites) {
 			continue
 		}
 		sch := ct.InputSchema
@@ -360,14 +382,15 @@ func (s *Server) toolList(p Principal) []protocol.ToolDefinition {
 		if e := enumFor("fetch"); len(e) > 0 {
 			tools = append(tools, protocol.ToolDefinition{Name: "fetch", Title: "Fetch record", Description: "Fetch one full record by collection and id, with configured relations expanded.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"collection": map[string]any{"type": "string", "enum": e, "description": "Collection to use."}, "id": map[string]any{"type": "string", "description": "Record id."}}, "required": []string{"collection", "id"}, "additionalProperties": false}, OutputSchema: fetchOutputSchema(), Annotations: readOnlyAnnotations("Fetch record")})
 		}
-		if e := enumFor("create"); len(e) > 0 {
-			tools = append(tools, protocol.ToolDefinition{Name: "create", Title: "Create record", Description: "Create a record. Collection rules, validation and hooks apply. Returns the created record.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"collection": map[string]any{"type": "string", "enum": e}, "data": map[string]any{"type": "object", "additionalProperties": true, "description": "Field values (see describe_collection)."}}, "required": []string{"collection", "data"}, "additionalProperties": false}, OutputSchema: fetchOutputSchema(), Annotations: writeAnnotations("Create record", false)})
+		if chat && !chatWrites {
+			// Chat v1.1 is read-only: no create/update/delete tools. The
+			// writes variant adds exactly what MCP would list for this caller.
+			return tools
 		}
-		if e := enumFor("update"); len(e) > 0 {
-			tools = append(tools, protocol.ToolDefinition{Name: "update", Title: "Update record", Description: "Update fields of an existing record. Collection rules, validation and hooks apply.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"collection": map[string]any{"type": "string", "enum": e}, "id": map[string]any{"type": "string"}, "data": map[string]any{"type": "object", "additionalProperties": true}}, "required": []string{"collection", "id", "data"}, "additionalProperties": false}, OutputSchema: fetchOutputSchema(), Annotations: &protocol.ToolAnnotations{Title: "Update record", DestructiveHint: true, IdempotentHint: true}})
-		}
-		if e := enumFor("delete"); len(e) > 0 {
-			tools = append(tools, protocol.ToolDefinition{Name: "delete", Title: "Delete record", Description: "Permanently delete a record. Collection rules and relation cascade settings apply.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"collection": map[string]any{"type": "string", "enum": e}, "id": map[string]any{"type": "string"}}, "required": []string{"collection", "id"}, "additionalProperties": false}, Annotations: &protocol.ToolAnnotations{Title: "Delete record", DestructiveHint: true, IdempotentHint: true}})
+		for _, op := range []string{"create", "update", "delete"} {
+			if e := enumFor(op); len(e) > 0 {
+				tools = append(tools, genericWriteToolDefinition(op, e))
+			}
 		}
 		return tools
 	}
@@ -392,20 +415,207 @@ func (s *Server) toolList(p Principal) []protocol.ToolDefinition {
 			}
 			tools = append(tools, protocol.ToolDefinition{Name: "fetch_" + alias, Title: title, Description: d, InputSchema: map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string", "description": "Record id."}}, "required": []string{"id"}, "additionalProperties": false}, OutputSchema: fetchOutputSchema(), Annotations: readOnlyAnnotations(title)})
 		}
-		if st, _ := s.opState(p, cfg, "create"); st != "unavailable" {
-			title := "Create " + cfg.Name
-			tools = append(tools, protocol.ToolDefinition{Name: "create_" + alias, Title: title, Description: "Create a " + cfg.Name + " record. Collection rules, validation and hooks apply.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"data": s.dataSchemaFor(cfg, "create")}, "required": []string{"data"}, "additionalProperties": false}, OutputSchema: fetchOutputSchema(), Annotations: writeAnnotations(title, false)})
+		if chat && !chatWrites {
+			// Chat v1.1 is read-only: no create/update/delete tools.
+			continue
 		}
-		if st, _ := s.opState(p, cfg, "update"); st != "unavailable" {
-			title := "Update " + cfg.Name
-			tools = append(tools, protocol.ToolDefinition{Name: "update_" + alias, Title: title, Description: "Update a " + cfg.Name + " record. Collection rules, validation and hooks apply.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}, "data": s.dataSchemaFor(cfg, "update")}, "required": []string{"id", "data"}, "additionalProperties": false}, OutputSchema: fetchOutputSchema(), Annotations: &protocol.ToolAnnotations{Title: title, DestructiveHint: true, IdempotentHint: true}})
-		}
-		if st, _ := s.opState(p, cfg, "delete"); st != "unavailable" {
-			title := "Delete " + cfg.Name
-			tools = append(tools, protocol.ToolDefinition{Name: "delete_" + alias, Title: title, Description: "Permanently delete a " + cfg.Name + " record.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}}, "required": []string{"id"}, "additionalProperties": false}, Annotations: &protocol.ToolAnnotations{Title: title, DestructiveHint: true, IdempotentHint: true}})
+		for _, op := range []string{"create", "update", "delete"} {
+			if st, _ := s.opState(p, cfg, op); st != "unavailable" {
+				tools = append(tools, s.writeToolDefinition(cfg, op))
+			}
 		}
 	}
 	return tools
+}
+
+// genericWriteToolDefinition returns one generated generic-mode write tool. enum
+// is the caller-visible collection list; nil leaves the collection unconstrained,
+// which is what a proposal fingerprint uses because it must not depend on a
+// caller.
+func genericWriteToolDefinition(op string, enum []string) protocol.ToolDefinition {
+	collection := map[string]any{"type": "string"}
+	if len(enum) > 0 {
+		collection["enum"] = enum
+	}
+	switch op {
+	case "create":
+		return protocol.ToolDefinition{Name: "create", Title: "Create record", Description: "Create a record. Collection rules, validation and hooks apply. Returns the created record.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"collection": collection, "data": map[string]any{"type": "object", "additionalProperties": true, "description": "Field values (see describe_collection)."}}, "required": []string{"collection", "data"}, "additionalProperties": false}, OutputSchema: fetchOutputSchema(), Annotations: writeAnnotations("Create record", false)}
+	case "update":
+		return protocol.ToolDefinition{Name: "update", Title: "Update record", Description: "Update fields of an existing record. Collection rules, validation and hooks apply.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"collection": collection, "id": map[string]any{"type": "string"}, "data": map[string]any{"type": "object", "additionalProperties": true}}, "required": []string{"collection", "id", "data"}, "additionalProperties": false}, OutputSchema: fetchOutputSchema(), Annotations: &protocol.ToolAnnotations{Title: "Update record", DestructiveHint: true, IdempotentHint: true}}
+	case "delete":
+		return protocol.ToolDefinition{Name: "delete", Title: "Delete record", Description: "Permanently delete a record. Collection rules and relation cascade settings apply.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"collection": collection, "id": map[string]any{"type": "string"}}, "required": []string{"collection", "id"}, "additionalProperties": false}, Annotations: &protocol.ToolAnnotations{Title: "Delete record", DestructiveHint: true, IdempotentHint: true}}
+	}
+	return protocol.ToolDefinition{}
+}
+
+// writeToolDefinition returns one generated per-collection write tool.
+func (s *Server) writeToolDefinition(cfg *CollectionConfig, op string) protocol.ToolDefinition {
+	alias := cfg.Alias
+	if alias == "" {
+		alias = cfg.Name
+	}
+	switch op {
+	case "create":
+		title := "Create " + cfg.Name
+		return protocol.ToolDefinition{Name: "create_" + alias, Title: title, Description: "Create a " + cfg.Name + " record. Collection rules, validation and hooks apply.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"data": s.dataSchemaFor(cfg, "create")}, "required": []string{"data"}, "additionalProperties": false}, OutputSchema: fetchOutputSchema(), Annotations: writeAnnotations(title, false)}
+	case "update":
+		title := "Update " + cfg.Name
+		return protocol.ToolDefinition{Name: "update_" + alias, Title: title, Description: "Update a " + cfg.Name + " record. Collection rules, validation and hooks apply.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}, "data": s.dataSchemaFor(cfg, "update")}, "required": []string{"id", "data"}, "additionalProperties": false}, OutputSchema: fetchOutputSchema(), Annotations: &protocol.ToolAnnotations{Title: title, DestructiveHint: true, IdempotentHint: true}}
+	case "delete":
+		title := "Delete " + cfg.Name
+		return protocol.ToolDefinition{Name: "delete_" + alias, Title: title, Description: "Permanently delete a " + cfg.Name + " record.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}}, "required": []string{"id"}, "additionalProperties": false}, Annotations: &protocol.ToolAnnotations{Title: title, DestructiveHint: true, IdempotentHint: true}}
+	}
+	return protocol.ToolDefinition{}
+}
+
+// chatWriteDescriptor is the server-side identity of one write tool offered on
+// chat. Every field comes from configuration, never from a caller or model
+// text, so the descriptor can be recomputed later to compare a proposal against
+// the tool the user reviewed.
+type chatWriteDescriptor struct {
+	name string
+	// custom is set for a registered custom tool; nil for a generated tool.
+	custom *ToolSpec
+	def    protocol.ToolDefinition
+	// action is create, update or delete for a generated tool.
+	action string
+	// collection is a generated tool's collection. It is empty in generic mode,
+	// where the call's arguments name the collection.
+	collection string
+}
+
+// chatWriteTool returns the descriptor of name when it is a write tool declared
+// for chat, and false otherwise. It never consults the caller: whether this
+// caller may use the tool is a separate, per-call gate. An editor tool is a
+// write tool here: chat offers it, but it can only become a proposal.
+func (s *Server) chatWriteTool(name string) (chatWriteDescriptor, bool) {
+	for i := range s.cfg.CustomTools {
+		ct := &s.cfg.CustomTools[i]
+		if ct.Name != name || !ct.onChatChannel() || !ct.writeEffect() {
+			continue
+		}
+		sch := ct.InputSchema
+		if sch == nil {
+			sch = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		return chatWriteDescriptor{name: name, custom: ct, def: protocol.ToolDefinition{Name: name, InputSchema: sch}}, true
+	}
+	if s.toolMode() == "generic" {
+		if name != "create" && name != "update" && name != "delete" {
+			return chatWriteDescriptor{}, false
+		}
+		return chatWriteDescriptor{name: name, action: name, def: genericWriteToolDefinition(name, nil)}, true
+	}
+	for _, op := range []string{"create", "update", "delete"} {
+		alias, ok := strings.CutPrefix(name, op+"_")
+		if !ok {
+			continue
+		}
+		cfg, found := s.host.LookupCollection(alias)
+		if !found {
+			return chatWriteDescriptor{}, false
+		}
+		return chatWriteDescriptor{name: name, action: op, collection: cfg.Name, def: s.writeToolDefinition(cfg, op)}, true
+	}
+	return chatWriteDescriptor{}, false
+}
+
+// fingerprint is the tool identity a proposal binds. Any change to the tool's
+// definition, input schema, effects, policy, execution location or channels
+// changes it, so a proposal reviewed against one tool can never execute
+// against another.
+func (d chatWriteDescriptor) fingerprint() string {
+	payload := map[string]any{
+		"name":        d.name,
+		"inputSchema": d.def.InputSchema,
+	}
+	if d.custom != nil {
+		payload["effects"] = d.custom.effectKind()
+		payload["policy"] = d.custom.Policy
+		payload["executionLocation"] = d.custom.executionLocation()
+		payload["channels"] = d.custom.Channels
+	} else {
+		payload["action"] = d.action
+		payload["collection"] = d.collection
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// ChatToolFingerprint returns the current fingerprint of a chat write tool, or
+// false when name is not one. A proposal records the fingerprint it was created
+// with, so executing one can refuse a tool whose definition changed after the
+// user reviewed it.
+func (s *Server) ChatToolFingerprint(name string) (string, bool) {
+	d, ok := s.chatWriteTool(name)
+	if !ok {
+		return "", false
+	}
+	return d.fingerprint(), true
+}
+
+// editor reports whether the descriptor is an editor tool: its effect is a
+// draft patch the browser applies, never a server call.
+func (d chatWriteDescriptor) editor() bool {
+	return d.custom != nil && d.custom.editorTool()
+}
+
+// chatWriteSummary renders the user-facing effect of one planned call. It is
+// built server-side from the tool identity and the validated arguments; model
+// text contributes nothing, because the user's review decision is about this
+// sentence.
+func (d chatWriteDescriptor) chatWriteSummary(args map[string]any, collection string) string {
+	if d.custom != nil {
+		title := d.custom.Title
+		if title == "" {
+			title = d.custom.Name
+		}
+		return title + " (changes data)"
+	}
+	switch d.action {
+	case "create":
+		return "Create a record in " + collection
+	case "update":
+		return "Update record " + getStringArg(args, "id") + " in " + collection
+	case "delete":
+		return "Delete record " + getStringArg(args, "id") + " in " + collection
+	}
+	return d.name
+}
+
+// chatWriteTarget names the resource a generated write affects: the record for
+// an update or delete, the collection for a create. A custom tool's target is
+// its own handler's business, so it stays empty; an editor tool's target is set
+// from its editorId by the planner.
+func (d chatWriteDescriptor) chatWriteTarget(args map[string]any, collection string) string {
+	if d.custom != nil {
+		return ""
+	}
+	if d.action == "update" || d.action == "delete" {
+		if id := getStringArg(args, "id"); id != "" {
+			return collection + "/" + id
+		}
+	}
+	return collection
+}
+
+// chatEditSummary renders the reviewed effect of one editor call: which
+// document it edits and when it takes effect. Like chatWriteSummary it is built
+// server-side, never from model text, because the user's review decision is
+// about this sentence.
+func (d chatWriteDescriptor) chatEditSummary(editorID string) string {
+	title := d.name
+	if d.custom != nil {
+		title = d.custom.Title
+		if title == "" {
+			title = d.custom.Name
+		}
+	}
+	return title + ": edit " + editorID + " (applies in the editor after approval)"
 }
 
 func baseSearchPropsGeneric() map[string]any {
@@ -462,97 +672,209 @@ func isWriteOp(op string) bool { return op == "create" || op == "update" || op =
 
 // --- tools/call ---
 
+// toolListedWithWrites reports whether the listing for channel, with or without
+// the internal chat-writes variant, would offer name. It is re-evaluated on
+// every call so a permission change takes effect immediately, and it is the one
+// gate both listing and calling use, so they can never disagree.
+func (s *Server) toolListedWithWrites(ctx context.Context, p Principal, channel, name string, chatWrites bool) bool {
+	cache, _ := ctx.Value(toolListingKey{}).(*toolListingCache)
+	key := toolListingCacheKey{p.CollectionID, p.ID, channel, chatWrites}
+	if cache != nil {
+		if names, ok := cache.sets[key]; ok {
+			return names[name]
+		}
+	}
+	names := map[string]bool{}
+	for _, def := range s.listToolsWithWrites(p, channel, chatWrites) {
+		names[def.Name] = true
+	}
+	if cache != nil {
+		cache.sets[key] = names
+	}
+	return names[name]
+}
+
+// toolListingKey carries a toolListingCache in a context. One chat entry point
+// (a call, a plan, a check, an execution) checks the listing several times; the
+// cache builds it once per entry point and principal. A new entry point gets a
+// fresh cache, so a permission change still applies to the very next step.
+type toolListingKey struct{}
+
+type toolListingCacheKey struct {
+	collectionID, principalID, channel string
+	chatWrites                         bool
+}
+
+type toolListingCache struct {
+	sets map[toolListingCacheKey]map[string]bool
+}
+
+// withToolListingCache returns ctx carrying a fresh listing cache.
+func withToolListingCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, toolListingKey{}, &toolListingCache{sets: map[toolListingCacheKey]map[string]bool{}})
+}
+
+// auditTarget names the effect, collection and action a tool name implies,
+// without executing anything. It lets a refused call still be audited with the
+// operation it attempted; unknown names return empty values.
+func (s *Server) auditTarget(name string, args map[string]any) (effect, collection, action string) {
+	for _, ct := range s.cfg.CustomTools {
+		if ct.Name == name {
+			return ct.effectKind(), "", ""
+		}
+	}
+	mode := s.toolMode()
+	for _, op := range []string{"search", "fetch", "create", "update", "delete"} {
+		if mode == "generic" && name == op {
+			action = op
+		} else if mode != "generic" {
+			if rest, ok := strings.CutPrefix(name, op+"_"); ok {
+				action = op
+				if cfg, found := s.host.LookupCollection(rest); found {
+					collection = cfg.Name
+				}
+			}
+		}
+		if action != "" {
+			break
+		}
+	}
+	if action == "" {
+		return "", "", ""
+	}
+	effect = "read"
+	if isWriteOp(action) {
+		effect = "write"
+	}
+	if mode == "generic" && collection == "" {
+		if cfg, found := s.host.LookupCollection(strings.TrimSpace(getStringArg(args, "collection"))); found {
+			collection = cfg.Name
+		}
+	}
+	return effect, collection, action
+}
+
+// callTool runs one tool call on one channel and returns its outcome in the
+// form both surfaces need: a result value (a protocol.ToolResult for custom
+// tools, the structured value otherwise), a user-safe error message, or a
+// JSON-RPC error. It never writes a response, so chat and MCP share one policy
+// pipeline. requestID only labels audit events.
+func (s *Server) callTool(ctx context.Context, p Principal, baseURL, channel, name string, args map[string]any, requestID any) (any, string, *protocol.Error) {
+	return s.callToolWithWrites(ctx, p, baseURL, channel, false, name, args, requestID)
+}
+
+// callToolWithWrites is callTool with the internal chat-writes flag. Only the
+// chat executor passes it, for a caller whose host enabled proposals, and it
+// widens nothing else: AllowWrites, policy and PocketBase rules still gate each
+// tool and each write.
+func (s *Server) callToolWithWrites(ctx context.Context, p Principal, baseURL, channel string, chatWrites bool, name string, args map[string]any, requestID any) (any, string, *protocol.Error) {
+	if args == nil {
+		args = map[string]any{}
+	}
+	// A chat turn may only use what its listing offers it. Anything else is
+	// refused exactly like a hidden tool: the caller receives the same message
+	// whether the tool is secret or merely not part of the surface.
+	if channel == "chat" && !s.toolListedWithWrites(ctx, p, channel, name, chatWrites) {
+		effect, collection, action := s.auditTarget(name, args)
+		s.emitAudit(channel, p, name, effect, collection, action, "denied", time.Now(), requestID, nil)
+		return nil, "Tool is unavailable.", nil
+	}
+	if name == "describe_access" {
+		return s.describeAccessResult(p, channel, chatWrites), "", nil
+	}
+	if name == "describe_collection" {
+		return s.describeResult(p, args)
+	}
+	for _, ct := range s.cfg.CustomTools {
+		if ct.Name == name {
+			if !s.customAllowedOnChannel(p, ct, channel, chatWrites) {
+				s.emitAudit(channel, p, name, ct.effectKind(), "", "", "denied", time.Now(), requestID, nil)
+				return nil, "Tool is unavailable.", nil
+			}
+			if ct.editorTool() {
+				// An editor effect is a draft patch the browser applies after
+				// approval. It has no server handler by contract, so this is
+				// also the guard that keeps a nil handler from running.
+				s.emitAudit(channel, p, name, "write", "", "", "denied", time.Now(), requestID, nil)
+				return nil, "This change needs review.", nil
+			}
+			return s.callCustom(ctx, p, baseURL, channel, ct, args, requestID)
+		}
+	}
+	dispatch := func(cfg *CollectionConfig, op string) (any, string, *protocol.Error) {
+		start := time.Now()
+		outcome := "error"
+		defer func() {
+			s.emitAudit(channel, p, name, "", cfg.Name, op, outcome, start, requestID, s.auditPayload(args))
+		}()
+
+		if ok, msg := s.canInvoke(p, cfg, op); !ok {
+			outcome = "denied"
+			return nil, msg, nil
+		}
+		var out any
+		var err error
+		switch op {
+		case "search":
+			out, err = s.host.Search(ctx, p, cfg, args, baseURL)
+		case "fetch":
+			out, err = s.host.Fetch(ctx, p, cfg, args, baseURL)
+		default:
+			out, err = s.host.Write(ctx, p, op, cfg, args, baseURL)
+		}
+		if err != nil {
+			outcome = AuditOutcome(err)
+			if msg, ok := UserMessage(err); ok {
+				return nil, msg, nil
+			}
+			return nil, "Internal error while processing the request.", nil
+		}
+		outcome = "ok"
+		return out, "", nil
+	}
+	if s.toolMode() == "generic" {
+		switch name {
+		case "search", "fetch", "create", "update", "delete":
+			cfg, ok := s.host.LookupCollection(strings.TrimSpace(getStringArg(args, "collection")))
+			if !ok {
+				return nil, "Unknown or unavailable collection. Call describe_access to list collections.", nil
+			}
+			return dispatch(cfg, name)
+		}
+	} else {
+		for _, op := range []string{"search", "fetch", "create", "update", "delete"} {
+			if coll, ok := strings.CutPrefix(name, op+"_"); ok {
+				if cfg, ok2 := s.host.LookupCollection(coll); ok2 {
+					return dispatch(cfg, op)
+				}
+				break
+			}
+		}
+	}
+	return nil, "", &protocol.Error{Code: protocol.CodeInvalidParams, Message: "Unknown tool", Data: name}
+}
+
+// handleToolCall is the MCP writer around callTool.
 func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request, p Principal, id any, params json.RawMessage) {
 	var call protocol.ToolCallParams
 	if err := json.Unmarshal(params, &call); err != nil || call.Name == "" {
 		writeJSONRPCError(w, http.StatusOK, id, protocol.CodeInvalidParams, "Invalid params", "expected {name, arguments}")
 		return
 	}
-	if call.Arguments == nil {
-		call.Arguments = map[string]any{}
-	}
-	ctx := r.Context()
-	base := s.baseURL(r)
-	toolErr := func(msg string) { writeToolError(w, id, msg) }
-	dispatchErr := func(err error) {
-		if msg, ok := UserMessage(err); ok {
-			toolErr(msg)
-			return
-		}
-		writeToolError(w, id, "Internal error while processing the request.")
-	}
-	if call.Name == "describe_access" {
-		s.handleDescribeAccess(w, p, id)
+	result, userErr, rpcErr := s.callTool(r.Context(), p, s.baseURL(r), "mcp", call.Name, call.Arguments, id)
+	if rpcErr != nil {
+		writeJSONRPCError(w, http.StatusOK, id, rpcErr.Code, rpcErr.Message, rpcErr.Data)
 		return
 	}
-	if call.Name == "describe_collection" {
-		s.handleDescribe(w, p, id, call.Arguments)
+	if userErr != "" {
+		writeToolError(w, id, userErr)
 		return
 	}
-	for _, ct := range s.cfg.CustomTools {
-		if ct.Name == call.Name {
-			if !s.customAllowed(p, ct) {
-				s.emitAudit(p, call.Name, ct.effectKind(), "", "", "denied", time.Now(), id, nil)
-				toolErr("Tool is unavailable.")
-				return
-			}
-			s.callCustom(w, r, p, id, ct, call.Arguments)
-			return
-		}
+	if tr, ok := result.(protocol.ToolResult); ok {
+		writeJSONRPCResult(w, id, tr)
+		return
 	}
-	dispatch := func(cfg *CollectionConfig, op string) {
-		start := time.Now()
-		outcome := "error"
-		defer func() {
-			s.emitAudit(p, call.Name, "", cfg.Name, op, outcome, start, id, s.auditPayload(call.Arguments))
-		}()
-
-		if ok, msg := s.canInvoke(p, cfg, op); !ok {
-			outcome = "denied"
-			toolErr(msg)
-			return
-		}
-		var out any
-		var err error
-		switch op {
-		case "search":
-			out, err = s.host.Search(ctx, p, cfg, call.Arguments, base)
-		case "fetch":
-			out, err = s.host.Fetch(ctx, p, cfg, call.Arguments, base)
-		default:
-			out, err = s.host.Write(ctx, p, op, cfg, call.Arguments, base)
-		}
-		if err != nil {
-			outcome = AuditOutcome(err)
-			dispatchErr(err)
-			return
-		}
-		outcome = "ok"
-		writeToolResult(w, id, out)
-	}
-	if s.toolMode() == "generic" {
-		switch call.Name {
-		case "search", "fetch", "create", "update", "delete":
-			cfg, ok := s.host.LookupCollection(strings.TrimSpace(getStringArg(call.Arguments, "collection")))
-			if !ok {
-				toolErr("Unknown or unavailable collection. Call describe_access to list collections.")
-				return
-			}
-			dispatch(cfg, call.Name)
-			return
-		}
-	} else {
-		for _, op := range []string{"search", "fetch", "create", "update", "delete"} {
-			if name, ok := strings.CutPrefix(call.Name, op+"_"); ok {
-				if cfg, ok2 := s.host.LookupCollection(name); ok2 {
-					dispatch(cfg, op)
-					return
-				}
-				break
-			}
-		}
-	}
-	writeJSONRPCError(w, http.StatusOK, id, protocol.CodeInvalidParams, "Unknown tool", call.Name)
+	writeToolResult(w, id, result)
 }
 
 func (s *Server) operationsMap(p Principal, cfg *CollectionConfig) map[string]any {
@@ -571,7 +893,7 @@ func (s *Server) operationsMap(p Principal, cfg *CollectionConfig) map[string]an
 	return out
 }
 
-func (s *Server) handleDescribeAccess(w http.ResponseWriter, p Principal, id any) {
+func (s *Server) describeAccessResult(p Principal, channel string, chatWrites bool) map[string]any {
 	cols := []map[string]any{}
 	for _, cfg := range s.callerVisibleCollections(p) {
 		cols = append(cols, map[string]any{
@@ -582,42 +904,39 @@ func (s *Server) handleDescribeAccess(w http.ResponseWriter, p Principal, id any
 	}
 	custom := []string{}
 	for _, ct := range s.cfg.CustomTools {
-		if !s.customAllowed(p, ct) {
+		if !s.customAllowedOnChannel(p, ct, channel, chatWrites) {
 			continue
 		}
 		custom = append(custom, ct.Name)
 	}
-	writeToolResult(w, id, map[string]any{
+	return map[string]any{
 		"manifestRevision": s.manifest().Revision(),
 		"toolMode":         s.toolMode(),
-		"allowWrites":      s.cfg.AllowWrites,
+		"allowWrites":      s.cfg.AllowWrites && (channel != "chat" || chatWrites),
 		"collections":      cols,
 		"customTools":      custom,
-	})
+	}
 }
 
-func (s *Server) handleDescribe(w http.ResponseWriter, p Principal, id any, args map[string]any) {
+func (s *Server) describeResult(p Principal, args map[string]any) (any, string, *protocol.Error) {
 	name := strings.TrimSpace(getStringArg(args, "collection"))
 	if name == "" {
 		list := []map[string]any{}
 		for _, cfg := range s.callerVisibleCollections(p) {
 			list = append(list, map[string]any{"name": cfg.Name, "alias": cfg.Alias, "description": cfg.Description, "searchFields": cfg.SearchFields, "expand": cfg.Expand})
 		}
-		writeToolResult(w, id, map[string]any{"collections": list})
-		return
+		return map[string]any{"collections": list}, "", nil
 	}
 	cfg, ok := s.host.LookupCollection(name)
 	if !ok || !s.hostVisible(p, cfg) || !s.policyAllows(p, cfg) {
-		writeToolError(w, id, "Unknown or unavailable collection \""+name+"\".")
-		return
+		return nil, "Unknown or unavailable collection \"" + name + "\".", nil
 	}
 	if cfg.HasOperation("describe") == false {
 		// describe_collection itself requires the describe operation when declared set is restrictive;
 		// collections without describe are treated as unavailable for detailed description
 		// (list-level info remains in describe_access). Fall through only if no operations declared (legacy fake configs).
 		if len(cfg.Operations) > 0 {
-			writeToolError(w, id, "Unknown or unavailable collection \""+name+"\".")
-			return
+			return nil, "Unknown or unavailable collection \"" + name + "\".", nil
 		}
 	}
 	fieldDesc := func(names []string) []map[string]any {
@@ -666,7 +985,7 @@ func (s *Server) handleDescribe(w http.ResponseWriter, p Principal, id any, args
 	}
 	// also expose flat fields list for compatibility
 	out["fieldList"] = fieldDesc(cfg.ReadFields)
-	writeToolResult(w, id, out)
+	return out, "", nil
 }
 
 // --- helpers ---

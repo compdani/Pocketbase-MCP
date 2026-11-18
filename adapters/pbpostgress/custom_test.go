@@ -26,7 +26,9 @@ func serveWith(t *testing.T, env *testEnv, srv *Server) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.RegisterRoutes(r)
+	if err := srv.RegisterRoutes(r); err != nil {
+		t.Fatal(err)
+	}
 	mux, err := r.BuildMux()
 	if err != nil {
 		t.Fatal(err)

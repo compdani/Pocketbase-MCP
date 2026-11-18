@@ -56,6 +56,9 @@ type Adapter struct {
 type Server struct {
 	*pbmcp.Server
 	Adapter *Adapter
+
+	// chat is set only by EnableChat; nil keeps the surface completely off.
+	chat *chatMount
 }
 
 // New validates the manifest and builds the registry; it binds collection-change hooks (per server).
@@ -115,6 +118,9 @@ func New(app core.App, cfg pbmcp.Config) (*Server, error) {
 }
 
 // RegisterRoutes mounts the MCP endpoint(s) on the PB router. Call during OnServe.
+//
+// When the host enabled chat with EnableChat before this call, the chat handler
+// is mounted as well, under its own prefix.
 func (s *Server) RegisterRoutes(r *router.Router[*core.RequestEvent]) error {
 	if err := s.Adapter.registerOAuthRoutes(r); err != nil {
 		return err
@@ -127,7 +133,7 @@ func (s *Server) RegisterRoutes(r *router.Router[*core.RequestEvent]) error {
 			r.DELETE(path, s.handle)
 		}
 	}
-	return nil
+	return s.registerChatRoutes(r)
 }
 
 func (s *Server) handle(e *core.RequestEvent) error {

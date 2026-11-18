@@ -11,3 +11,7 @@ pb_data/
 
 # macOS
 .DS_Store
+
+# Raw verification logs (kept locally; the MILESTONE-*-REPORT.md files are the record)
+/verification/m4-*.txt
+/verification/checks-*.txt
