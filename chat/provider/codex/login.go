@@ -19,6 +19,7 @@ type Loopback struct {
 	ln          net.Listener
 	srv         *http.Server
 	result      chan url.Values
+	outcome     chan error
 	closed      chan struct{}
 	closeOnce   sync.Once
 }
@@ -40,25 +41,71 @@ func Listen(port int) (*Loopback, error) {
 		RedirectURI: fmt.Sprintf("http://127.0.0.1:%d%s", ln.Addr().(*net.TCPAddr).Port, CallbackPath),
 		ln:          ln,
 		result:      make(chan url.Values, 1),
+		outcome:     make(chan error, 1),
 		closed:      make(chan struct{}),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(CallbackPath, func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		message := "Signed in. You can close this tab and return to the app."
-		if e := q.Get("error"); e != "" {
-			message = "Sign-in didn't complete: " + e
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = fmt.Fprintf(w, "<!doctype html><meta charset=\"utf-8\"><title>Sign in</title><body style=\"font-family:system-ui;padding:40px\">%s</body>", html.EscapeString(message))
 		select {
 		case lb.result <- q:
 		default:
+			// Another callback (or a pasted URL) already owns this attempt.
+			writeCallbackPage(w, "This sign-in is already being handled. Return to the app.")
+			return
+		}
+		// Say "Signed in" only after the server has exchanged the code and
+		// stored the credentials.
+		var err error
+		answered := false
+		select {
+		case err = <-lb.outcome:
+			answered = true
+		case <-lb.closed:
+			select {
+			case err = <-lb.outcome:
+				answered = true
+			default:
+			}
+		case <-time.After(callbackWait):
+		case <-r.Context().Done():
+			return
+		}
+		switch {
+		case answered && err == nil:
+			writeCallbackPage(w, "Signed in. You can close this tab and return to the app.")
+		case q.Get("error") != "":
+			writeCallbackPage(w, "Sign-in didn't complete: "+q.Get("error"))
+		case answered:
+			writeCallbackPage(w, "Sign-in didn't complete. Return to the app for details and try again.")
+		default:
+			writeCallbackPage(w, "Sign-in is still being checked. Return to the app to see the result.")
 		}
 	})
 	lb.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = lb.srv.Serve(ln) }()
 	return lb, nil
+}
+
+// callbackWait bounds how long the callback page waits for the code exchange.
+const callbackWait = 60 * time.Second
+
+func writeCallbackPage(w http.ResponseWriter, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = fmt.Fprintf(w, "<!doctype html><meta charset=\"utf-8\"><title>Sign in</title><body style=\"font-family:system-ui;padding:40px\">%s</body>", html.EscapeString(message))
+}
+
+// Respond reports the outcome of the callback Wait returned, so the browser
+// page can show it. It never blocks, and a nil Loopback ignores it.
+func (lb *Loopback) Respond(err error) {
+	if lb == nil {
+		return
+	}
+	select {
+	case lb.outcome <- err:
+	default:
+	}
 }
 
 // Deliver hands a callback query received elsewhere (a pasted URL) to Wait. It

@@ -459,7 +459,7 @@ Keep the existing fields. Add choices, default and per-choice attachments:
   ],
   "defaultChoice": "openai-personal::gpt-5",
   "features": { "proposals": true, "uploads": true },
-  "limits": { "...": "as today; attachmentTypes is the default choice's set" }
+  "limits": { "...": "as today; attachmentTypes is the union over ready providers" }
 }
 ```
 
@@ -468,8 +468,9 @@ format is `providerID + "::" + model`, split at the first `::`; provider IDs
 cannot contain `::`. Clients must treat it as opaque.
 
 `models` stays a de-duplicated flat list for old clients. `limits.attachmentTypes`
-becomes the default choice's support, so an old client behaves exactly as it did
-with a single provider. New clients use the selected choice's list.
+is the union over ready providers, which is exactly what `POST /uploads`
+accepts. New clients check the selected choice's list before sending; the
+server checks the turn against its resolved provider either way.
 
 ### 9.2 `POST /conversations/{id}/turns`
 

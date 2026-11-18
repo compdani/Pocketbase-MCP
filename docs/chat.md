@@ -116,7 +116,9 @@ settings surface: `GET/POST /providers`, `GET/PATCH/DELETE /providers/{id}`,
 `POST /providers/{id}/test`, `POST /providers/{id}/models/refresh`, and the Codex
 `signin`, `signin/complete`, `signin/cancel`, `signout` and `import` routes. It
 uses a separate superuser authenticator and never widens the normal chat
-surface. See [Managing providers](#managing-providers) for the update rules.
+surface. A wrong method on one of these paths is `405` with an `Allow` header,
+as on the chat routes. See [Managing providers](#managing-providers) for the
+update rules.
 
 Routes for features that are off return 404. Another user's records also
 return 404, the same as missing ones, so nothing leaks. Errors are
@@ -357,6 +359,13 @@ model, otherwise the unique provider that does. The resolved pair is stored on
 the turn (`provider` is absent on older turns). A turn is resolved once, so a
 catalog change never switches a running turn to another provider.
 
+Attachment types are listed at two levels. `limits.attachmentTypes` is what
+`POST /uploads` accepts: the union over every ready provider. Each choice's
+`attachmentTypes` is what that model can actually read, and a turn whose
+attachment its resolved model can't read is refused with
+`unsupported_attachment`. The browser client's `attach()` checks the union, or
+one model with `{model}`, and `send()` checks the model it sends to.
+
 ### Managing providers
 
 The settings API follows these rules:
@@ -397,7 +406,8 @@ and a gateway cannot silently widen the picker.
 
 A superuser starts sign-in from the settings API. The server creates a
 10-minute pending attempt and returns an authorization URL. On a browser on the
-server's machine a loopback listener completes it; on a remote browser the
+server's machine a loopback listener completes it, and its page says "Signed
+in" only after the code exchange succeeded and the credentials were stored; on a remote browser the
 superuser pastes the redirect URL back into the settings API. Only one attempt
 per provider runs at a time. It belongs to the superuser who started it, and
 cancelling it or starting a new one closes the old loopback listener. Credentials and

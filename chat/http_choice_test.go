@@ -14,6 +14,8 @@ type fakeChoiceRouter struct {
 	choices   []ModelChoice
 	providers map[string]provider.Provider
 	fail      bool
+	// supports overrides SupportsAttachment; nil accepts every type.
+	supports func(string) bool
 }
 
 func (r *fakeChoiceRouter) Choices(context.Context) ([]ModelChoice, error) {
@@ -55,7 +57,34 @@ func (r *fakeChoiceRouter) Resolve(_ context.Context, providerID, model string) 
 	return ResolvedModel{}, ErrModelUnknown
 }
 
-func (r *fakeChoiceRouter) SupportsAttachment(string) bool { return true }
+func (r *fakeChoiceRouter) SupportsAttachment(mime string) bool {
+	if r.supports != nil {
+		return r.supports(mime)
+	}
+	return true
+}
+
+// limits.attachmentTypes is what POST /uploads accepts: the union over ready
+// providers, not the default choice's narrower list.
+func TestHTTPStatusAttachmentTypesAreTheUploadUnion(t *testing.T) {
+	router := &fakeChoiceRouter{
+		choices: []ModelChoice{
+			{ID: ChoiceID("a", "m1"), Provider: "a", Model: "m1", Default: true, AttachmentTypes: []string{"text/plain"}},
+			{ID: ChoiceID("b", "m2"), Provider: "b", Model: "m2", AttachmentTypes: []string{"text/plain", "image/png"}},
+		},
+		providers: map[string]provider.Provider{},
+		supports:  func(mime string) bool { return mime == "text/plain" || mime == "image/png" },
+	}
+	f := newFixture(t, fixtureOptions{router: router, uploads: true})
+	status := decodeStatus(t, f.call(http.MethodGet, testPrefix+"/status", nil, nil).expect(http.StatusOK))
+	if status.Limits.AttachmentTypes == nil {
+		t.Fatal("attachmentTypes missing")
+	}
+	got := strings.Join(*status.Limits.AttachmentTypes, ",")
+	if !strings.Contains(got, "text/plain") || !strings.Contains(got, "image/png") || len(*status.Limits.AttachmentTypes) != 2 {
+		t.Fatalf("attachmentTypes = %v, want the union text/plain + image/png", got)
+	}
+}
 
 func TestHTTPTurnSelectsProviderChoice(t *testing.T) {
 	step := func(text string) *scripted.Provider {

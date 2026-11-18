@@ -101,6 +101,18 @@ export function resolveChoice(choices, requested) {
 }
 
 /**
+ * The attachment types a message to `choice` can carry: that choice's own list
+ * when it has one, otherwise `limits.attachmentTypes` (the union the upload
+ * route accepts). Returns null when nothing is known.
+ */
+export function attachmentTypesFor(limits, choice = null) {
+  const source = choice && Array.isArray(choice.attachmentTypes)
+    ? choice.attachmentTypes
+    : limits && Array.isArray(limits.attachmentTypes) ? limits.attachmentTypes : null;
+  return source ? source.filter((type) => typeof type === 'string' && type !== '') : null;
+}
+
+/**
  * Flatten canonical transcript messages into one entry per part. A notice
  * message (role "notice", part "proposal_outcome") and an attachment part
  * therefore become ordinary entries a host can render, with the message id and
@@ -1151,12 +1163,16 @@ export class ChatController extends EventTarget {
    *
    * Resolves with the stored upload descriptors, which are also kept in
    * `state.pendingUploads` until they are sent.
+   *
+   * Without `options.model` the type check is the union every ready model
+   * accepts; pass the picker value (a choice id or model id) to check against
+   * that model instead. `send()` always checks against the model it sends to.
    */
   attach(files, options = {}) {
     return this._track(this._attach(files, options));
   }
 
-  async _attach(files, { signal } = {}) {
+  async _attach(files, { signal, model } = {}) {
     if (this._disposed) return [];
     const list = Array.from(files ?? []);
     if (list.length === 0) return [];
@@ -1178,7 +1194,10 @@ export class ChatController extends EventTarget {
     );
     // Validate the whole batch before storing anything, so a refused file never
     // leaves earlier files of the same batch uploaded.
-    this._validateAttachments(list, pending.length);
+    const choice = typeof model === 'string' && model !== ''
+      ? resolveChoice(this._state.choices, model)
+      : null;
+    this._validateAttachments(list, pending.length, choice);
     const uploads = [];
     for (const file of list) {
       const upload = await this._client.uploadFile(conversationId, file, file.name, { signal });
@@ -1213,16 +1232,17 @@ export class ChatController extends EventTarget {
    * and the per-turn count. A file whose type the browser cannot name is sent
    * anyway and left to the server, which types it from the bytes.
    */
-  _validateAttachments(files, alreadyPending = 0) {
+  _validateAttachments(files, alreadyPending = 0, choice = null) {
     this._requireUploads();
     const limits = this._state.limits ?? {};
     const maxBytes = Number(limits.maxUploadBytes) > 0 ? Number(limits.maxUploadBytes) : 0;
     const maxCount = Number(limits.maxAttachmentsPerTurn) > 0
       ? Number(limits.maxAttachmentsPerTurn)
       : 0;
-    const types = Array.isArray(limits.attachmentTypes)
-      ? limits.attachmentTypes.map((t) => String(t).toLowerCase())
-      : null;
+    // With a choice, check what that model can read; without one, the union
+    // the upload route accepts.
+    const allowed = attachmentTypesFor(limits, choice);
+    const types = allowed ? allowed.map((t) => String(t).toLowerCase()) : null;
 
     if (maxCount > 0 && alreadyPending + files.length > maxCount) {
       throw new ChatApiError(
@@ -1254,12 +1274,12 @@ export class ChatController extends EventTarget {
    * File/Blob values are uploaded first. Returns the ids in the submitted
    * order and keeps the new uploads pending until the turn is accepted.
    */
-  async _resolveAttachments(conversationId, attachments, epoch) {
+  async _resolveAttachments(conversationId, attachments, epoch, choice = null) {
     const list = Array.isArray(attachments) ? attachments : [];
     if (list.length === 0) return [];
     this._requireUploads();
     const blobs = list.filter((item) => typeof item !== 'string');
-    this._validateAttachments(blobs, list.length - blobs.length);
+    this._validateAttachments(blobs, list.length - blobs.length, choice);
 
     const uploads = [];
     for (const file of blobs) {
@@ -1311,7 +1331,7 @@ export class ChatController extends EventTarget {
     const epoch = this._epoch;
     let attachmentIds = [];
     if (Array.isArray(attachments) && attachments.length > 0) {
-      attachmentIds = await this._resolveAttachments(conversationId, attachments, epoch);
+      attachmentIds = await this._resolveAttachments(conversationId, attachments, epoch, selected);
       if (attachmentIds === null || !this._current(epoch)) return null;
     }
 

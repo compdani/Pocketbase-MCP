@@ -186,6 +186,12 @@ server's own code (`unsupported_media`, `payload_too_large`, `invalid_attachment
 so a UI branches on one set of codes. The server re-validates every file and
 assigns the MIME type from its bytes.
 
+With a provider catalog, `limits.attachmentTypes` is the union every ready
+model accepts. Pass `attach(files, { model })` (a choice id or model id) to
+check against one model instead. `send()` always checks new files against the
+model it sends to, and the server refuses a turn whose model can't read an
+attachment with `unsupported_attachment`.
+
 `send(text, { attachments })` accepts upload ids and `File`/`Blob` values; blobs
 are uploaded first. Uploads stay in `state.pendingUploads` until a turn accepts
 them, and `clearAttachments()` drops them. An account switch clears both

@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -303,5 +304,61 @@ func TestManagerStaleLoopbackDoesNotFailNewAttempt(t *testing.T) {
 	}
 	if status := manager.Status(context.Background()); status.Error != "" {
 		t.Fatalf("status error = %q", status.Error)
+	}
+}
+
+func loopbackPage(t *testing.T, start SignInStart, query string) string {
+	t.Helper()
+	authURL, err := url.Parse(start.AuthURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirect := authURL.Query().Get("redirect_uri")
+	if !strings.HasPrefix(redirect, "http://127.0.0.1:") {
+		t.Skipf("no loopback listener: %q", redirect)
+	}
+	res, err := http.Get(redirect + "?" + query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	return string(body)
+}
+
+// The loopback page reports the real outcome of the code exchange, not just
+// that a callback arrived.
+func TestLoopbackPageShowsTheSignInOutcome(t *testing.T) {
+	as := newAuthServer(t)
+	defer as.Close()
+	store := &memCredStore{}
+	manager := NewManager(store, &OAuth{AuthBase: as.URL, HTTP: as.Client()}, "urn:uuid:1234", "codex")
+	defer manager.Close()
+
+	start, err := manager.BeginSignIn(context.Background(), "admin-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := loopbackPage(t, start, "state=wrong&code=code-1")
+	if strings.Contains(page, "Signed in") || !strings.Contains(page, "didn") {
+		t.Fatalf("bad-state page = %q", page)
+	}
+	if manager.Status(context.Background()).SignedIn {
+		t.Fatal("bad state signed in")
+	}
+
+	start, err = manager.BeginSignIn(context.Background(), "admin-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authURL, _ := url.Parse(start.AuthURL)
+	as.nonce = authURL.Query().Get("nonce")
+	state := authURL.Query().Get("state")
+	page = loopbackPage(t, start, "state="+url.QueryEscape(state)+"&code=code-1&client_id=oaiapp_test")
+	if !strings.Contains(page, "Signed in") {
+		t.Fatalf("success page = %q", page)
+	}
+	if !manager.Status(context.Background()).SignedIn {
+		t.Fatal("success page shown without stored credentials")
 	}
 }

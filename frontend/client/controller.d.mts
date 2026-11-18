@@ -167,6 +167,15 @@ export declare function resolveChoice(
   choices: ChatModelChoice[] | null | undefined,
   requested?: string,
 ): ChatModelChoice | null;
+/**
+ * The attachment types a message to `choice` can carry: its own list, or
+ * `limits.attachmentTypes` (the union the upload route accepts). Null when
+ * nothing is known.
+ */
+export declare function attachmentTypesFor(
+  limits: { attachmentTypes?: readonly string[] } | null | undefined,
+  choice?: ChatModelChoice | null,
+): string[] | null;
 
 export declare function transcriptFromMessages(messages?: ChatMessage[]): ChatTranscriptEntry[];
 
@@ -254,7 +263,14 @@ export declare class ChatController extends EventTarget {
    * Validate and upload files, creating a conversation when none is open.
    * Resolves with the stored uploads, also kept in state.pendingUploads.
    */
-  attach(files: Iterable<Blob | File>, options?: { signal?: AbortSignal }): Promise<ChatUpload[]>;
+  /**
+   * Upload files. `model` (a choice id or model id) checks the types against
+   * that model; without it the check is the union `limits.attachmentTypes`.
+   */
+  attach(
+    files: Iterable<Blob | File>,
+    options?: { signal?: AbortSignal; model?: string },
+  ): Promise<ChatUpload[]>;
 
   /** Drop every attachment that has not been sent yet. */
   clearAttachments(): ChatControllerState;

@@ -236,33 +236,41 @@ func (m *Manager) completeSignIn(ctx context.Context, adminID string, query url.
 		return errors.New("this sign-in belongs to another administrator")
 	case !m.now().Before(pending.expiresAt):
 		m.mu.Unlock()
-		m.failSignIn(adminID, errors.New("sign-in timed out; start again"))
-		return errors.New("sign-in timed out; start again")
+		err := errors.New("sign-in timed out; start again")
+		// Report to the browser page before failSignIn closes the listener.
+		pending.loopback.Respond(err)
+		m.failSignIn(adminID, err)
+		return err
 	}
 	pending.done = true
 	p := pending.pending
 	loopback := pending.loopback
 	m.mu.Unlock()
 
-	cred, err := m.OAuth.Complete(ctx, p, query)
-	if err != nil {
+	// Every outcome is reported to the loopback page before the listener is
+	// closed, so the browser tab shows the real result.
+	fail := func(err error) error {
+		loopback.Respond(err)
 		m.failSignIn(adminID, err)
 		return err
 	}
+	cred, err := m.OAuth.Complete(ctx, p, query)
+	if err != nil {
+		return fail(err)
+	}
 	if !cred.HasPlan() {
-		m.failSignIn(adminID, ErrPlanNotGranted)
-		return ErrPlanNotGranted
+		return fail(ErrPlanNotGranted)
 	}
 	cred.HostID = m.HostID
 	if err := m.Store.Save(ctx, cred); err != nil {
-		m.failSignIn(adminID, fmt.Errorf("save credentials: %w", err))
-		return fmt.Errorf("save credentials: %w", err)
+		return fail(fmt.Errorf("save credentials: %w", err))
 	}
 
 	m.mu.Lock()
 	m.pending = nil
 	m.lastErr = ""
 	m.mu.Unlock()
+	loopback.Respond(nil)
 	loopback.Close()
 	return nil
 }

@@ -129,3 +129,43 @@ func (r *recorder) Result() *http.Response {
 	return &http.Response{StatusCode: r.code, Header: r.header, Body: http.NoBody}
 }
 func (r *recorder) String() string { return r.body.String() }
+
+func TestProviderAdminWrongMethodIs405(t *testing.T) {
+	store := NewMemStore(MemStoreOptions{})
+	runner := mustRunner(t, RunnerConfig{Store: store, Provider: scripted.New()})
+	h, err := NewHandler(HandlerConfig{
+		Prefix:        testPrefix,
+		Runner:        runner,
+		Store:         store,
+		Auth:          newFakeAuth(),
+		AdminAuth:     fakeAdminAuth{},
+		ProviderAdmin: &fakeProviderAdmin{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		method, path string
+		code         int
+		allow        string
+	}{
+		{http.MethodDelete, "/providers", http.StatusMethodNotAllowed, "GET, HEAD, POST"},
+		{http.MethodGet, "/providers/actions/test", http.StatusMethodNotAllowed, "POST"},
+		{http.MethodPut, "/providers/openai", http.StatusMethodNotAllowed, "GET, HEAD, PATCH, DELETE"},
+		{http.MethodGet, "/providers/openai/signin", http.StatusMethodNotAllowed, "POST"},
+		{http.MethodGet, "/providers/openai/nope", http.StatusNotFound, ""},
+		{http.MethodGet, "/providers/openai", http.StatusOK, ""},
+	}
+	for _, tc := range cases {
+		req, _ := http.NewRequest(tc.method, testPrefix+tc.path, nil)
+		req.Header.Set("Authorization", "Bearer root")
+		rec := newRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.code != tc.code {
+			t.Fatalf("%s %s = %d %s, want %d", tc.method, tc.path, rec.code, rec.String(), tc.code)
+		}
+		if got := rec.header.Get("Allow"); got != tc.allow {
+			t.Fatalf("%s %s Allow = %q, want %q", tc.method, tc.path, got, tc.allow)
+		}
+	}
+}

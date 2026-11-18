@@ -725,6 +725,9 @@ function writeAttachmentLimits(element, snapshot) {
   const limits = snapshot && snapshot.limits && typeof snapshot.limits === 'object'
     ? snapshot.limits
     : {};
+  // limits.attachmentTypes is the union the upload route accepts. The element
+  // only reports the chosen model on submit, so the picker cannot narrow to
+  // one model here; send() checks the files against the chosen model.
   const types = Array.isArray(limits.attachmentTypes)
     ? limits.attachmentTypes.filter((type) => typeof type === 'string' && type !== '')
     : null;

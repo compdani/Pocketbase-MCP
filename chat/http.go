@@ -337,6 +337,60 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r.WithContext(ctx))
 }
 
+// routeShape is one registered method and path pattern.
+type routeShape struct {
+	method string
+	path   string
+}
+
+// adminMethodFallback answers a provider admin path whose method has no route:
+// 405 with an Allow header when some route matches the path, otherwise the
+// JSON not-found body.
+func (h *handler) adminMethodFallback(routes []routeShape) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var allow []string
+		seen := map[string]bool{}
+		for _, rt := range routes {
+			if !routePathMatches(rt.path, r.URL.Path) || seen[rt.method] {
+				continue
+			}
+			seen[rt.method] = true
+			allow = append(allow, rt.method)
+			if rt.method == http.MethodGet && !seen[http.MethodHead] {
+				seen[http.MethodHead] = true
+				allow = append(allow, http.MethodHead)
+			}
+		}
+		if len(allow) == 0 {
+			h.notFound(w, r)
+			return
+		}
+		h.methodNotAllowed(strings.Join(allow, ", "))(w, r)
+	}
+}
+
+// routePathMatches reports whether path fits pattern, where a "{name}" segment
+// matches any one non-empty segment.
+func routePathMatches(pattern, path string) bool {
+	want := strings.Split(pattern, "/")
+	got := strings.Split(path, "/")
+	if len(want) != len(got) {
+		return false
+	}
+	for i, seg := range want {
+		if strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "}") {
+			if got[i] == "" {
+				return false
+			}
+			continue
+		}
+		if seg != got[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // providerAdminPath reports whether path belongs to the provider admin
 // surface. It is only consulted when that surface is mounted, so an ordinary
 // chat path is never routed to a nil AdminAuth.
@@ -426,11 +480,14 @@ func (h *handler) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	byPath := make(map[string][]string, len(table))
 	var order []string
+	var adminRoutes []routeShape
 	for _, rt := range table {
 		mux.HandleFunc(rt.method+" "+rt.path, rt.fn)
-		// Admin routes skip the method-less 405 pattern: a literal action path
-		// and a wildcard route can otherwise be ambiguous to ServeMux.
+		// Admin routes can't each get a method-less 405 pattern: a literal
+		// action path and a wildcard route would conflict in ServeMux. One
+		// subtree fallback below answers 405 for them instead.
 		if strings.HasPrefix(rt.path, p+"/providers") {
+			adminRoutes = append(adminRoutes, routeShape{method: rt.method, path: rt.path})
 			continue
 		}
 		if _, ok := byPath[rt.path]; !ok {
@@ -448,6 +505,13 @@ func (h *handler) routes() *http.ServeMux {
 			}
 		}
 		mux.HandleFunc(routePath, h.methodNotAllowed(strings.Join(allow, ", ")))
+	}
+	if len(adminRoutes) > 0 {
+		// Less specific than every admin route, so it only runs when no
+		// method-specific pattern matched.
+		fallback := h.adminMethodFallback(adminRoutes)
+		mux.HandleFunc(p+"/providers", fallback)
+		mux.HandleFunc(p+"/providers/", fallback)
 	}
 
 	// Unknown paths under the prefix answer with the protocol's JSON not-found
@@ -1074,10 +1138,10 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Uploads != nil {
 		limits.MaxUploadBytes = h.cfg.MaxUploadBytes
 		limits.MaxAttachmentsPerTurn = h.cfg.MaxAttachmentsPerTurn
+		// The same set POST /uploads accepts: with a router, the union over
+		// ready providers. Each choice lists what it can send, and a turn is
+		// checked against its resolved provider.
 		types := attachmentTypesFor(h.cfg.Runner.SupportsAttachment)
-		if defaultChoice.ID != "" && defaultChoice.AttachmentTypes != nil {
-			types = append([]string{}, defaultChoice.AttachmentTypes...)
-		}
 		limits.AttachmentTypes = &types
 	}
 	h.writeJSON(w, http.StatusOK, statusView{
