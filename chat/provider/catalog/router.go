@@ -177,6 +177,7 @@ func (r *Router) Reload(ctx context.Context) error {
 				Label:           m.Label,
 				Group:           p.Label,
 				AttachmentTypes: attachments,
+				Efforts:         m.Efforts,
 			})
 		}
 	}
@@ -415,6 +416,7 @@ func choiceFor(built *builtProvider, model string) (chat.ModelChoice, bool) {
 		Label:           m.Label,
 		Group:           built.config.Label,
 		AttachmentTypes: attachmentTypesFor(built.impl),
+		Efforts:         m.Efforts,
 	}, true
 }
 

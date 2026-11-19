@@ -216,6 +216,24 @@ export declare function registerProposalEntry(panel: AgentPanelLike): boolean;
  * Model choices for the element's menu. Returns labelled objects when the
  * controller has catalog choices, otherwise the legacy model-id strings.
  */
+/** One entry of the element's options menu (agent-panel's option shape). */
+export interface AgentEffortOption {
+  id: 'effort';
+  label: string;
+  choices: Array<{ value: string; label: string }>;
+}
+
+/**
+ * The "Reasoning effort" options-menu entry for the model the element has
+ * selected (`''` = the current or default choice), or null when that model
+ * takes no effort. The binding keeps it in `element.options` and sends the
+ * picked value with each turn.
+ */
+export declare function effortOptionFromState(
+  state: Pick<ChatControllerState, 'choices' | 'choice'> | null | undefined,
+  model?: string,
+): AgentEffortOption | null;
+
 export declare function modelsFromState(
   state: Pick<ChatControllerState, 'models' | 'choices'> | null | undefined,
 ): Array<string | AgentModelChoice>;

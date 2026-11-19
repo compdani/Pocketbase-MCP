@@ -158,3 +158,56 @@ func TestHTTPIdempotentRetryReturnsStoredTurnBeforeResolving(t *testing.T) {
 		t.Fatalf("retry = %+v", secondOut)
 	}
 }
+
+// A turn may name one of its choice's efforts; it is stored on the turn and
+// sent to the provider. Any other effort is a request error, never a failed
+// turn.
+func TestHTTPTurnReasoningEffort(t *testing.T) {
+	reply := func() *scripted.Provider {
+		return scripted.New(scripted.Step{Chunks: []provider.Chunk{
+			{Kind: provider.ChunkText, Text: "ok"},
+			{Kind: provider.ChunkDone},
+		}})
+	}
+	thinker, plain := reply(), reply()
+	router := &fakeChoiceRouter{
+		choices: []ModelChoice{
+			{ID: ChoiceID("a", "reasoner"), Provider: "a", Model: "reasoner", Default: true, Efforts: []string{"low", "medium", "high"}},
+			{ID: ChoiceID("a", "plain"), Provider: "a", Model: "plain"},
+		},
+		providers: map[string]provider.Provider{ChoiceID("a", "reasoner"): thinker, ChoiceID("a", "plain"): plain},
+	}
+	f := newFixture(t, fixtureOptions{router: router})
+
+	status := f.call(http.MethodGet, testPrefix+"/status", nil, nil).expect(http.StatusOK)
+	if !strings.Contains(string(status.body), `"efforts":["low","medium","high"]`) {
+		t.Fatalf("/status does not advertise efforts: %s", status.body)
+	}
+
+	conv := f.createConversation(nil)
+	res := f.call(http.MethodPost, testPrefix+"/conversations/"+conv.ID+"/turns", map[string]any{
+		"text": "think hard", "provider": "a", "model": "reasoner", "effort": "high",
+	}, nil).expect(http.StatusAccepted)
+	var out submitTurnView
+	res.decode(&out)
+	turn := waitForTurnState(t, f.store, ownerFor("user-a"), out.Turn.ID, TurnStateCompleted)
+	if turn.Effort != "high" {
+		t.Fatalf("stored effort = %q, want high", turn.Effort)
+	}
+	if reqs := thinker.Requests(); len(reqs) != 1 || reqs[0].ReasoningEffort != "high" {
+		t.Fatalf("provider requests = %+v, want one with effort high", reqs)
+	}
+
+	for name, body := range map[string]map[string]any{
+		"effort not offered by the model": {"text": "x", "provider": "a", "model": "plain", "effort": "high"},
+		"effort not listed for the model": {"text": "x", "provider": "a", "model": "reasoner", "effort": "xhigh"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conv := f.createConversation(nil)
+			f.call(http.MethodPost, testPrefix+"/conversations/"+conv.ID+"/turns", body, nil).expect(http.StatusBadRequest)
+		})
+	}
+	if n := len(plain.Requests()); n != 0 {
+		t.Fatalf("refused turns reached the provider %d time(s)", n)
+	}
+}

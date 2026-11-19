@@ -5,7 +5,10 @@ Status on 2026-11-19. Done, committed and covered by tests: the MCP server
 tools, uploads). The fork's OAuth branch is merged (pb-postgress PR #4) and
 pinned at `v0.41.6`. Chat v1.3 (provider catalog, OpenAI
 Responses, ChatGPT/Codex plan sign-in) is implemented and has had one review
-pass. It still needs staging and a real Codex sign-in.
+pass. It still needs staging and a real Codex sign-in. v0.1.1 adds a log
+line for every failed chat turn (with the provider's sanitized reason), plain
+messages for failed-turn codes in the agent-panel binding, and per-turn
+reasoning effort.
 
 Suggested order: browser check → staging tests → hardening →
 migrations.

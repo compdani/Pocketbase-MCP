@@ -36,7 +36,7 @@ func providerFixture(id string) catalog.Provider {
 		Kind:         catalog.KindOpenAI,
 		Enabled:      true,
 		BaseURL:      "https://example.invalid/v1",
-		Models:       []catalog.Model{{ID: "m1", Label: "Model 1"}},
+		Models:       []catalog.Model{{ID: "m1", Label: "Model 1", Efforts: []string{"low", "high"}}},
 		DefaultModel: "m1",
 		Headers:      map[string]string{"X-Test": "one"},
 		APIKey:       "sk-secret-" + id,
@@ -57,7 +57,8 @@ func TestProviderStoreRoundTripAndEncryption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.APIKey != "sk-secret-openai" || got.Models[0].ID != "m1" || got.Headers["X-Test"] != "one" {
+	if got.APIKey != "sk-secret-openai" || got.Models[0].ID != "m1" || got.Headers["X-Test"] != "one" ||
+		strings.Join(got.Models[0].Efforts, ",") != "low,high" {
 		t.Fatalf("provider = %+v", got)
 	}
 	rec, err := app.FindFirstRecordByData(store.providers, "slug", "openai")

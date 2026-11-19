@@ -267,8 +267,11 @@ type Turn struct {
 	IdempotencyKey string    `json:"idempotencyKey,omitempty"`
 	// Provider is the catalog id that served the turn. Empty means the legacy
 	// single-provider path or a turn stored before the catalog existed.
-	Provider  string      `json:"provider,omitempty"`
-	Model     string      `json:"model,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+	// Effort is the reasoning effort the turn asked for. Empty means the
+	// model's default.
+	Effort    string      `json:"effort,omitempty"`
 	CreatedAt time.Time   `json:"createdAt"`
 	UpdatedAt time.Time   `json:"updatedAt"`
 	Error     *TurnFailed `json:"error,omitempty"`

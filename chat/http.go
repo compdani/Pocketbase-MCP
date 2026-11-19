@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -845,6 +846,7 @@ type submitTurnRequest struct {
 	Text        *string  `json:"text"`
 	Provider    *string  `json:"provider"`
 	Model       *string  `json:"model"`
+	Effort      *string  `json:"effort"`
 	Attachments []string `json:"attachments"`
 }
 
@@ -1421,6 +1423,10 @@ func (h *handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 	if req.Model != nil {
 		model = strings.TrimSpace(*req.Model)
 	}
+	effort := ""
+	if req.Effort != nil {
+		effort = strings.TrimSpace(*req.Effort)
+	}
 
 	var target *ResolvedModel
 	if h.cfg.Router != nil {
@@ -1432,12 +1438,21 @@ func (h *handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 		target = &resolved
 		provider = resolved.Choice.Provider
 		model = resolved.Model
+		if effort != "" && !slices.Contains(resolved.Choice.Efforts, effort) {
+			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
+			return
+		}
 	} else {
 		if provider != "" {
 			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
 			return
 		}
 		if model != "" && !h.modelAllowed(model) {
+			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
+			return
+		}
+		// The legacy single provider advertises no efforts.
+		if effort != "" {
 			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
 			return
 		}
@@ -1461,12 +1476,13 @@ func (h *handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: idempotencyKey,
 		Provider:       provider,
 		Model:          model,
+		Effort:         effort,
 		Target:         target,
 		Tools:          caller.Tools,
 		Deadline:       caller.Expires,
 	})
 	if err != nil {
-		if errors.Is(err, ErrModelUnknown) || errors.Is(err, ErrModelAmbiguous) || errors.Is(err, ErrNoModelConfigured) {
+		if errors.Is(err, ErrModelUnknown) || errors.Is(err, ErrModelAmbiguous) || errors.Is(err, ErrNoModelConfigured) || errors.Is(err, ErrEffortUnsupported) {
 			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
 			return
 		}

@@ -59,6 +59,10 @@ const ERROR_TEXT = Object.freeze({
   conflict: 'This conversation is busy. Try again in a moment.',
   provider: 'The assistant could not answer this time. Try again.',
   internal: 'Something went wrong on the server. Try again.',
+  // Failure codes the runner records on a failed turn (chat/runner.go).
+  provider_error: 'The AI provider refused the request. Try again, or ask an administrator to check the provider settings.',
+  max_steps: 'This question needed too many steps. Try asking something narrower.',
+  internal_error: 'Something went wrong on the server. Try again.',
   timeout: 'The server took too long to answer. Try again.',
   interrupted: 'The reply was interrupted. Try again.',
   cancelled: '',
@@ -115,6 +119,51 @@ export function modelsFromState(state) {
   }
   const models = state && Array.isArray(state.models) ? state.models : [];
   return models.filter((model) => typeof model === 'string' && model !== '');
+}
+
+const EFFORT_OPTION_ID = 'effort';
+const EFFORT_LABELS = Object.freeze({
+  none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high',
+});
+
+/**
+ * The choice a send would use for the element's `model` value: the exact
+ * choice id, else the one choice with that model id, else (for '') the
+ * controller's current choice or the server default. Mirrors the
+ * controller's resolveChoice without importing it.
+ */
+function selectedChoice(state, model) {
+  const choices = state && Array.isArray(state.choices) ? state.choices : [];
+  if (choices.length === 0) return null;
+  const value = typeof model === 'string' ? model : '';
+  if (value !== '') {
+    const exact = choices.find((choice) => choice && choice.id === value);
+    if (exact) return exact;
+    const byModel = choices.filter((choice) => choice && choice.model === value);
+    return byModel.length === 1 ? byModel[0] : null;
+  }
+  const current = typeof state.choice === 'string' ? choices.find((choice) => choice && choice.id === state.choice) : null;
+  return current ?? choices.find((choice) => choice && choice.default) ?? choices[0];
+}
+
+/**
+ * The "Reasoning effort" entry for the element's options menu, or null when
+ * the selected model takes no effort. "Model default" sends no effort.
+ */
+export function effortOptionFromState(state, model = '') {
+  const choice = selectedChoice(state, model);
+  const efforts = choice && Array.isArray(choice.efforts)
+    ? choice.efforts.filter((effort) => typeof effort === 'string' && effort !== '')
+    : [];
+  if (efforts.length === 0) return null;
+  return {
+    id: EFFORT_OPTION_ID,
+    label: 'Reasoning effort',
+    choices: [
+      { value: '', label: 'Model default' },
+      ...efforts.map((effort) => ({ value: effort, label: EFFORT_LABELS[effort] || effort })),
+    ],
+  };
 }
 
 /**
@@ -870,6 +919,7 @@ export function bindAgentPanel(element, controller, options = {}) {
     }
 
     writeProperty(element, 'models', modelsFromState(snapshot));
+    writeEffortOption(snapshot);
     writeAttachmentLimits(element, snapshot);
 
     if (page) {
@@ -884,7 +934,7 @@ export function bindAgentPanel(element, controller, options = {}) {
   }
 
   /** Send one message; resolves with whether the server accepted it. */
-  async function deliver(text, model, attachments = []) {
+  async function deliver(text, model, attachments = [], effort = '') {
     try {
       let conversationId = state().activeConversationId;
       if (!conversationId) {
@@ -906,6 +956,7 @@ export function bindAgentPanel(element, controller, options = {}) {
       paint();
       const sendOptions = {};
       if (model) sendOptions.model = model;
+      if (effort) sendOptions.effort = effort;
       if (attachments.length > 0) sendOptions.attachments = attachments;
       await controller.send(text, Object.keys(sendOptions).length > 0 ? sendOptions : undefined);
       return true;
@@ -916,6 +967,20 @@ export function bindAgentPanel(element, controller, options = {}) {
       paint();
       return false;
     }
+  }
+
+  // The binding owns only the "effort" entry of the options menu; options a
+  // host added itself are kept.
+  function writeEffortOption(snapshot) {
+    const existing = Array.isArray(element.options) ? element.options : [];
+    const others = existing.filter((option) => !option || option.id !== EFFORT_OPTION_ID);
+    const effort = effortOptionFromState(snapshot, typeof element.model === 'string' ? element.model : '');
+    writeProperty(element, 'options', effort ? [...others, effort] : others);
+  }
+
+  function onModelChange() {
+    // The element applies the new model after this (cancelable) event.
+    queueMicrotask(paint);
   }
 
   function onSubmit(event) {
@@ -942,6 +1007,8 @@ export function bindAgentPanel(element, controller, options = {}) {
     }
 
     const model = typeof detail.model === 'string' ? detail.model : '';
+    const chosen = detail.options && typeof detail.options === 'object' ? detail.options[EFFORT_OPTION_ID] : '';
+    const effort = typeof chosen === 'string' ? chosen : '';
     localError = null;
     pendingText = text;
     pendingConversationId = state().activeConversationId
@@ -950,7 +1017,7 @@ export function bindAgentPanel(element, controller, options = {}) {
     paint();
 
     if (files.length === 0) {
-      void deliver(text, model);
+      void deliver(text, model, [], effort);
       return;
     }
 
@@ -963,7 +1030,7 @@ export function bindAgentPanel(element, controller, options = {}) {
       element.clearComposer({ draft: fromDraft, attachments: false });
     }
     setAttachmentState(element, items, { busy: true });
-    void deliver(text, model, files).then((sent) => {
+    void deliver(text, model, files, effort).then((sent) => {
       if (sent) {
         for (const item of items) {
           const id = item && typeof item === 'object' ? item.id : '';
@@ -1068,6 +1135,7 @@ export function bindAgentPanel(element, controller, options = {}) {
 
   listen(controller, 'change', paint);
   listen(element, 'agent-submit', onSubmit);
+  listen(element, 'agent-model-change', onModelChange);
   listen(element, 'agent-stop', onStop);
   listen(element, 'agent-error-dismiss', onErrorDismiss);
   listen(element, 'agent-action', onAction);

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -123,6 +125,13 @@ type RunnerConfig struct {
 	MaxAttachmentBytesPerRequest int64
 	// Now is the clock used for deadline arithmetic. Nil means time.Now.
 	Now func() time.Time
+	// Logger receives one record per failed turn with the failure code, the
+	// provider id, the model and the cause. The cause never reaches the
+	// transcript or the browser, which only see the generic failure message,
+	// so this is where an operator finds out why a provider refused a turn.
+	// Provider errors are already sanitized (credentials removed, length
+	// bounded). Nil means slog.Default().
+	Logger *slog.Logger
 }
 
 // Runner executes turns against a provider and a tool executor.
@@ -181,6 +190,7 @@ type turnJob struct {
 	provider       provider.Provider
 	providerID     string
 	model          string
+	effort         string
 	tools          ToolExecutor
 	deadline       time.Time
 	done           chan struct{}
@@ -219,6 +229,9 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}
 	if cfg.MaxAttachmentBytesPerRequest <= 0 {
 		cfg.MaxAttachmentBytesPerRequest = defaultMaxAttachmentBytesPerRequest
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
 	}
 	nowFn := cfg.Now
 	if nowFn == nil {
@@ -328,6 +341,9 @@ type SubmitOptions struct {
 	// IdempotencyKey deduplicates a submission whose response was lost. An
 	// empty key means the submission is not deduplicated.
 	IdempotencyKey string
+	// Effort asks a reasoning model for this effort (one of the resolved
+	// choice's Efforts). Empty means the model's default.
+	Effort string
 	// Provider selects a catalog provider. Empty means the default provider,
 	// or the legacy single provider when no router is configured.
 	Provider string
@@ -378,11 +394,16 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 	if err != nil {
 		return Turn{}, false, err
 	}
+	effort := strings.TrimSpace(opts.Effort)
+	if effort != "" && !slices.Contains(resolved.Choice.Efforts, effort) {
+		return Turn{}, false, ErrEffortUnsupported
+	}
 	turn, created, err := r.cfg.Store.CreateTurn(ctx, owner, Turn{
 		ConversationID: conversationID,
 		IdempotencyKey: opts.IdempotencyKey,
 		Provider:       resolved.Choice.Provider,
 		Model:          resolved.Model,
+		Effort:         effort,
 	})
 	if err != nil {
 		return Turn{}, false, err
@@ -424,6 +445,7 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 		provider:       resolved.Provider,
 		providerID:     resolved.Choice.Provider,
 		model:          resolved.Model,
+		effort:         effort,
 		tools:          opts.Tools,
 		deadline:       opts.Deadline,
 		done:           make(chan struct{}),
@@ -706,7 +728,7 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 	defer r.jobDone(j)
 	defer func() {
 		if rec := recover(); rec != nil {
-			r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+			r.failJob(j, FailureInternal, fmt.Errorf("panic: %v", rec))
 		}
 	}()
 
@@ -717,7 +739,7 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 		return
 	}
 	if _, err := r.appendTurnEvent(bg, j.owner, j.turnID, EventTurnStarted, nil); err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return
 	}
 	if stop := r.stopKind(ctx, j); stop != "" {
@@ -727,7 +749,7 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 
 	for step := 0; ; step++ {
 		if step >= r.cfg.MaxSteps {
-			r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureMaxSteps)
+			r.failJob(j, FailureMaxSteps, nil)
 			return
 		}
 		if stop := r.stopKind(ctx, j); stop != "" {
@@ -737,11 +759,11 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 
 		req, err := r.buildRequest(ctx, j)
 		if err != nil {
-			r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+			r.failJob(j, FailureInternal, err)
 			return
 		}
 		if j.provider == nil {
-			r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+			r.failJob(j, FailureInternal, errors.New("chat: no provider resolved for the turn"))
 			return
 		}
 		ch, err := j.provider.Stream(ctx, req)
@@ -750,7 +772,7 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 				r.finishStopped(j, stop)
 				return
 			}
-			r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureProvider)
+			r.failJob(j, FailureProvider, err)
 			return
 		}
 
@@ -762,7 +784,7 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 			return
 		}
 		if err != nil {
-			r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureProvider)
+			r.failJob(j, FailureProvider, err)
 			return
 		}
 
@@ -785,7 +807,7 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 				Role:           RoleAssistant,
 				Parts:          parts,
 			}); err != nil {
-				r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+				r.failJob(j, FailureInternal, err)
 				return
 			}
 		}
@@ -852,6 +874,9 @@ func (r *Runner) consume(ctx context.Context, j *turnJob, ch <-chan provider.Chu
 		case provider.ChunkDone:
 			return text.String(), calls, nil
 		case provider.ChunkError:
+			if chunk.Err != nil {
+				return text.String(), calls, fmt.Errorf("%w: %w", errStreamFailed, chunk.Err)
+			}
 			return text.String(), calls, errStreamFailed
 		default:
 			return text.String(), calls, fmt.Errorf("chat: unknown chunk kind %q", string(chunk.Kind))
@@ -872,7 +897,7 @@ func (r *Runner) runTool(ctx context.Context, j *turnJob, call provider.ToolCall
 		Tool:      call.Name,
 		Arguments: args,
 	}); err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 	if stop := r.stopKind(ctx, j); stop != "" {
@@ -904,7 +929,7 @@ func (r *Runner) runTool(ctx context.Context, j *turnJob, call provider.ToolCall
 			Result: result,
 		}},
 	}); err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 	if _, err := r.appendTurnEvent(bg, j.owner, j.turnID, EventToolCompleted, ToolCompleted{
@@ -912,7 +937,7 @@ func (r *Runner) runTool(ctx context.Context, j *turnJob, call provider.ToolCall
 		Tool:   call.Name,
 		Result: result,
 	}); err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 	if stop := r.stopKind(ctx, j); stop != "" {
@@ -972,7 +997,7 @@ func (r *Runner) recordProposal(ctx context.Context, j *turnJob, call provider.T
 	}
 	canonical, hash, err := HashArguments(raw)
 	if err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 	stored, err := r.cfg.Proposals.CreateProposal(bg, j.owner, Proposal{
@@ -990,20 +1015,20 @@ func (r *Runner) recordProposal(ctx context.Context, j *turnJob, call provider.T
 		ExpiresAt:        r.now().Add(r.cfg.ProposalTTL),
 	})
 	if err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 	if draft.OnStored != nil {
 		draft.OnStored(stored)
 	}
 	if _, err := r.appendTurnEvent(bg, j.owner, j.turnID, EventProposalCreated, ProposalEventData{Proposal: stored}); err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 
 	result, err := proposalPendingResult(stored)
 	if err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 	if _, err := r.cfg.Store.AppendMessage(bg, j.owner, Message{
@@ -1017,7 +1042,7 @@ func (r *Runner) recordProposal(ctx context.Context, j *turnJob, call provider.T
 			Result: result,
 		}},
 	}); err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 	if _, err := r.appendTurnEvent(bg, j.owner, j.turnID, EventToolCompleted, ToolCompleted{
@@ -1025,7 +1050,7 @@ func (r *Runner) recordProposal(ctx context.Context, j *turnJob, call provider.T
 		Tool:   call.Name,
 		Result: result,
 	}); err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 	if stop := r.stopKind(ctx, j); stop != "" {
@@ -1064,7 +1089,7 @@ func (r *Runner) failTool(ctx context.Context, j *turnJob, call provider.ToolCal
 	}
 	payload, err := json.Marshal(map[string]string{"error": failure})
 	if err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 	if _, err := r.cfg.Store.AppendMessage(bg, j.owner, Message{
@@ -1079,7 +1104,7 @@ func (r *Runner) failTool(ctx context.Context, j *turnJob, call provider.ToolCal
 			IsError: true,
 		}},
 	}); err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 	if _, err := r.appendTurnEvent(bg, j.owner, j.turnID, EventToolFailed, ToolFailed{
@@ -1087,7 +1112,7 @@ func (r *Runner) failTool(ctx context.Context, j *turnJob, call provider.ToolCal
 		Tool:    call.Name,
 		Message: failure,
 	}); err != nil {
-		r.finishJob(j, TurnStateRunning, TurnStateFailed, FailureInternal)
+		r.failJob(j, FailureInternal, err)
 		return false
 	}
 	return true
@@ -1160,6 +1185,29 @@ func (r *Runner) stopKind(ctx context.Context, j *turnJob) string {
 // finishJob stores a terminal state and its one terminal event through the
 // store's atomic FinishTurn, then publishes the event. code is the failure code
 // for failed and interrupted turns and is ignored otherwise.
+// failJob logs why a running turn failed, then ends it with code. The stored
+// turn and its terminal event keep only the generic failure message.
+func (r *Runner) failJob(j *turnJob, code string, cause error) {
+	attrs := []any{
+		"code", code,
+		"turn", j.turnID,
+		"conversation", j.conversationID,
+		"provider", j.providerID,
+		"model", j.model,
+	}
+	if j.effort != "" {
+		attrs = append(attrs, "effort", j.effort)
+	}
+	if cause != nil {
+		attrs = append(attrs, "error", cause.Error())
+	}
+	if code == FailureMaxSteps {
+		attrs = append(attrs, "maxSteps", r.cfg.MaxSteps)
+	}
+	r.cfg.Logger.Warn("chat: turn failed", attrs...)
+	r.finishJob(j, TurnStateRunning, TurnStateFailed, code)
+}
+
 func (r *Runner) finishJob(j *turnJob, from, to TurnState, code string) {
 	typ, data := terminalPayload(to, code)
 	ev, err := NewEvent(j.conversationID, j.turnID, typ, data)
@@ -1241,10 +1289,11 @@ func (r *Runner) buildRequest(ctx context.Context, j *turnJob) (provider.Request
 		}
 	}
 	return provider.Request{
-		Model:    j.model,
-		System:   r.cfg.System,
-		Messages: messages,
-		Tools:    defs,
+		Model:           j.model,
+		System:          r.cfg.System,
+		Messages:        messages,
+		Tools:           defs,
+		ReasoningEffort: j.effort,
 	}, nil
 }
 

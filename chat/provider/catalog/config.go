@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/compdani/pocketbase-mcp/chat/provider"
 	"github.com/compdani/pocketbase-mcp/chat/provider/codex"
 )
 
@@ -45,6 +46,11 @@ func (s Scope) Validate() error {
 type Model struct {
 	ID    string
 	Label string
+	// Efforts lists the reasoning efforts the model accepts (values from
+	// provider.ReasoningEfforts). Empty means the model takes no effort, and
+	// a turn naming one is refused. Discovery fills it for Codex plan models
+	// and known OpenAI reasoning models; administrators can edit it.
+	Efforts []string `json:",omitempty"`
 }
 
 // Provider is one catalog entry. APIKey is a runtime secret: the adapter
@@ -133,6 +139,14 @@ func (p Provider) Validate() error {
 	}
 	seenModels := make(map[string]struct{}, len(p.Models))
 	for _, m := range p.Models {
+		for _, e := range m.Efforts {
+			if !provider.ValidReasoningEffort(e) {
+				return fmt.Errorf("provider %q model %q has unknown reasoning effort %q", p.ID, m.ID, e)
+			}
+		}
+		if len(m.Efforts) > 0 && p.Kind == KindAnthropic {
+			return fmt.Errorf("provider %q: reasoning effort is not supported for Anthropic models", p.ID)
+		}
 		if _, ok := seenModels[m.ID]; ok {
 			return fmt.Errorf("provider %q has duplicate model %q", p.ID, m.ID)
 		}
@@ -206,6 +220,7 @@ func (p Provider) Normalized() Provider {
 		if m.Label == "" {
 			m.Label = m.ID
 		}
+		m.Efforts = NormalizeEfforts(m.Efforts)
 		models = append(models, m)
 	}
 	p.Models = models
@@ -243,4 +258,56 @@ type Store interface {
 	SaveSetting(ctx context.Context, scope Scope, key string, value any) error
 	// HostID returns the install's stable ext_agent_host_id, creating it once.
 	HostID(ctx context.Context, scope Scope) (string, error)
+}
+
+// NormalizeEfforts trims, lowercases and de-duplicates efforts and orders
+// them as provider.ReasoningEfforts does. Unknown values are kept (at the end)
+// so Validate can report them.
+func NormalizeEfforts(efforts []string) []string {
+	if len(efforts) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var unknown []string
+	for _, e := range efforts {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" || seen[e] {
+			continue
+		}
+		seen[e] = true
+		if !provider.ValidReasoningEffort(e) {
+			unknown = append(unknown, e)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for _, e := range provider.ReasoningEfforts {
+		if seen[e] {
+			out = append(out, e)
+		}
+	}
+	out = append(out, unknown...)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// DefaultEfforts guesses the efforts for a model id an OpenAI-compatible
+// /models list returns, which says nothing about reasoning. The gpt-5 family
+// (except chat-tuned ids) and the o-series take low/medium/high; anything
+// else gets none. A gateway prefix such as "openai/" is ignored.
+func DefaultEfforts(modelID string) []string {
+	id := strings.ToLower(modelID)
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		id = id[i+1:]
+	}
+	if strings.Contains(id, "chat") || strings.Contains(id, "audio") || strings.Contains(id, "realtime") || strings.Contains(id, "search") {
+		return nil
+	}
+	for _, prefix := range []string{"gpt-5", "o1", "o3", "o4"} {
+		if strings.HasPrefix(id, prefix) {
+			return []string{"low", "medium", "high"}
+		}
+	}
+	return nil
 }
