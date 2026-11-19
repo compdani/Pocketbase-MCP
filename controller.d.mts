@@ -236,6 +236,11 @@ export declare class ChatController extends EventTarget {
       model?: string;
       /** Explicit provider id; normally derived from the catalog choice. */
       provider?: string;
+      /**
+       * Reasoning effort for the turn. Sent only when the resolved choice
+       * lists it in `efforts`; otherwise dropped (model default).
+       */
+      effort?: string;
       attachments?: Array<string | Blob | File>;
     },
   ): Promise<ChatSubmitResult | null>;

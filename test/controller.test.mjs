@@ -1082,3 +1082,33 @@ test('attach checks the union, or the named model; send checks the model it send
   );
   assert.equal((await controller.attach([png()], { model: 'b::m2' })).length, 1);
 });
+
+test('send passes an effort only when the resolved choice lists it', async () => {
+  const client = makeClient();
+  client.statusResult = {
+    ...STATUS,
+    models: ['reasoner', 'plain'],
+    choices: [
+      { id: 'a::reasoner', provider: 'a', model: 'reasoner', default: true, efforts: ['low', 'high'] },
+      { id: 'a::plain', provider: 'a', model: 'plain' },
+    ],
+    defaultChoice: 'a::reasoner',
+  };
+  client.detailResult = detail(conversation('c1'), []);
+  client.submitResult = { turn: turn('queued'), created: true };
+  client.streamTurn = async () => ({ lastSeq: 0, terminal: true });
+
+  const controller = new ChatController({ client });
+  await controller.init();
+  await controller.open('c1');
+
+  await controller.send('one', { effort: 'high' });
+  await settle(controller);
+  await controller.send('two', { model: 'a::plain', effort: 'high' });
+  await settle(controller);
+  await controller.send('three', { model: 'a::reasoner', effort: 'xhigh' });
+  await settle(controller);
+
+  const efforts = client.calls.filter((c) => c.method === 'submitTurn').map((c) => c.options.effort);
+  assert.deepEqual(efforts, ['high', undefined, undefined]);
+});
