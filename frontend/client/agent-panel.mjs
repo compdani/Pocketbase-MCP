@@ -59,6 +59,10 @@ const ERROR_TEXT = Object.freeze({
   conflict: 'This conversation is busy. Try again in a moment.',
   provider: 'The assistant could not answer this time. Try again.',
   internal: 'Something went wrong on the server. Try again.',
+  // Failure codes the runner records on a failed turn (chat/runner.go).
+  provider_error: 'The AI provider refused the request. Try again, or ask an administrator to check the provider settings.',
+  max_steps: 'This question needed too many steps. Try asking something narrower.',
+  internal_error: 'Something went wrong on the server. Try again.',
   timeout: 'The server took too long to answer. Try again.',
   interrupted: 'The reply was interrupted. Try again.',
   cancelled: '',
