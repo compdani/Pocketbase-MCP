@@ -32,7 +32,7 @@ node examples/chat/plain/serve.mjs   # http://127.0.0.1:5174
 |---|---|---|
 | `PORT` | `5174` | Port on `127.0.0.1` |
 | `PB_URL` | `http://127.0.0.1:8090` | Where `/api/` is proxied |
-| `AGENT_PANEL_DIR` | unset: `/agent-panel/` redirects to agent-panel `v0.4.1` on jsDelivr | A local agent-panel checkout to serve at `/agent-panel/` instead |
+| `AGENT_PANEL_DIR` | unset: `/agent-panel/` redirects to agent-panel `v0.5.0` on jsDelivr | A local agent-panel checkout to serve at `/agent-panel/` instead |
 
 ## The note editor
 

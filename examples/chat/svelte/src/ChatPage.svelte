@@ -41,9 +41,7 @@
     // more" (agent-panel's has-more) while the server has another page. The
     // controller re-reads the list after each turn, on focus, and when
     // another tab or element for this account changes it.
-    // contextUsage: 'slot' shows how full the context is (with a Compact
-    // button) on agent-panel versions without the built-in context ring.
-    binding = bindAgentPanel(page, controller, { client, contextUsage: 'slot' });
+    binding = bindAgentPanel(page, controller, { client });
 
     // Login: setAccount derives the account key, aborts anything the previous
     // account owned, clears state and loads /status plus the first page of

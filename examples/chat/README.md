@@ -47,8 +47,8 @@ The log confirms it: `chat enabled with the OFFLINE DEMO provider … at
 See each example's README. Every one proxies `/api` to the server on
 `PB_URL` (default `http://127.0.0.1:8090`) and streams events through
 unbuffered. They use
-[agent-panel](https://github.com/compdani/agent-panel) `v0.4.1` (the binding
-needs `v0.4.0` or later): Vue and
+[agent-panel](https://github.com/compdani/agent-panel) `v0.5.0` (the binding
+needs `v0.4.0` or later; 0.5.0 adds the context ring): Vue and
 Svelte install it with `npm install`, and the plain example loads it from
 jsDelivr. Set `AGENT_PANEL_DIR` to use a local agent-panel checkout instead.
 
@@ -64,7 +64,7 @@ Sign in as `demo@example.com` / `password123`, then:
 | `edit rev:0 New text` | The model proposes `edit_note`. Only the plain example can apply it: approving changes the note and bumps its revision ("Applied in the editor — not saved yet"). Use the revision the note shows; an old one is reported as out of date. Vue and Svelte show the card, but approving reports `editor_unavailable`. |
 | a file, via the paperclip, paste or drop | It's uploaded and shown as a chip on your message; clicking the chip downloads it. The demo replies with the file's name. Limits come from `/status`. |
 
-| `long` (send it three or four times) | With the server started with `MCP_CHAT_CONTEXT_WINDOW=4000 MCP_CHAT_COMPACT_MODEL=auto`, each reply is long, so the context fills up: a context indicator appears next to the composer (agent-panel 0.5's ring, or a "72% context" button on older versions), the oldest messages are summarized after a turn, and a divider marks where the summary ends. **Compact** (or the button) summarizes at once. |
+| `long` (send it three or four times) | With the server started with `MCP_CHAT_CONTEXT_WINDOW=4000 MCP_CHAT_COMPACT_MODEL=auto`, each reply is long, so the context fills up: a ring appears next to Send (amber, then red), the oldest messages are summarized after a turn, and a divider marks where the summary ends. Click the ring, then **Compact conversation**, to summarize at once. |
 
 **New chat**, the sidebar, rename and delete all work. **New chat** starts a
 draft: the first message creates the conversation. The sidebar ends with

@@ -27,9 +27,8 @@ migrations.
 - **Chat v1.4: context window management** is implemented and tested:
   token-budget history, overflow retry, background and manual summaries, and
   the context ring with Compact. See [context-window-plan.md](context-window-plan.md)
-  and [chat.md section 11](chat.md#11-context-window-and-summaries). Still to
-  do: release agent-panel 0.5.0 (the ring) and bump the examples to it, check
-  the overflow error shapes against real providers on staging, and try a
+  and [chat.md section 11](chat.md#11-context-window-and-summaries). The examples pin agent-panel v0.5.0 for the ring. Still to
+  do: check the overflow error shapes against real providers on staging, and try a
   summary with a real model.
 
 - **Staging-test chat v1.3.** Add a real provider, sign in Codex on a

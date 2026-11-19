@@ -30,10 +30,9 @@ differences from the plan below:
 - **Element API names.** agent-panel already uses "context" (the "+" menu's
   Add context, the page's context bar), so the API is `contextUsage`,
   `context-threshold`, `agent-compact`, `openContextUsage()` and the parts
-  `context-usage*` / `context-compact`. It is implemented in the local
-  agent-panel checkout as 0.5.0 (browser checks pass in Chromium and
-  WebKit) but not released. Until it is, the examples pass
-  `contextUsage: 'slot'` and get a small button in `composer-actions`.
+  `context-usage*` / `context-compact`, released in agent-panel v0.5.0, which
+  the examples pin. The binding's `contextUsage: 'slot'` option still draws
+  a small button in `composer-actions` for hosts on older versions.
 - **Verified end to end** with the stock demo server
   (`MCP_CHAT_CONTEXT_WINDOW=4000 MCP_CHAT_COMPACT_MODEL=auto`), the plain
   example and the local agent-panel in Chromium: ring at 81%, background

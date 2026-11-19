@@ -309,8 +309,8 @@ render, instead of making every consumer walk `messages[].parts` itself.
 
 ### `bindAgentPanel` / entry mapping
 
-> **Requires agent-panel v0.4.0 or later; v0.4.1 recommended.** Install it with
-> `npm install github:compdani/agent-panel#v0.4.1`. 0.4.0 adds the panel's
+> **Requires agent-panel v0.4.0 or later; v0.5.0 recommended.** Install it with
+> `npm install github:compdani/agent-panel#v0.5.0`. 0.4.0 adds the panel's
 > conversation switcher (`conversations-menu`, with delete), the built-in
 > "Load more" (`has-more` / `agent-load-more`), and the panel's
 > `conversations` / `active` properties that the list sync writes. With 0.3.x,
@@ -318,6 +318,8 @@ render, instead of making every consumer walk `messages[].parts` itself.
 > "Load more". 0.4.1 changes only the panel's look: the switcher becomes the
 > header title (with New chat beside Close), the `switcher-end` slot and the
 > `floating` attribute are new, and the binding needs no change for them.
+> 0.5.0 adds the composer's context ring (`contextUsage`, `agent-compact`),
+> which the binding fills from `state.context`; older versions show no ring.
 
 Binds one controller to one `<agent-panel>` or `<agent-page>` from
 [`agent-panel`](https://github.com/compdani/agent-panel). The element is passed

@@ -29,7 +29,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
  * (github.com/compdani/agent-panel). Without AGENT_PANEL_DIR, `/agent-panel/*`
  * redirects here.
  */
-export const AGENT_PANEL_VERSION = 'v0.4.1';
+export const AGENT_PANEL_VERSION = 'v0.5.0';
 export const AGENT_PANEL_CDN = `https://cdn.jsdelivr.net/gh/compdani/agent-panel@${AGENT_PANEL_VERSION}`;
 export const DEFAULT_PB_URL = 'http://127.0.0.1:8090';
 export const DEFAULT_PORT = 5174;
