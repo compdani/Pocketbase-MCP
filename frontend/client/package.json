@@ -1,6 +1,6 @@
 {
   "name": "@pocketbase-mcp/chat-client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Dependency-free browser client and framework-neutral controller for the MCP chat HTTP API.",
   "type": "module",
   "main": "./index.mjs",
