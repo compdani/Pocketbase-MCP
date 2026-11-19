@@ -13,5 +13,8 @@
     "@sveltejs/vite-plugin-svelte": "7.3.1",
     "svelte": "5.57.3",
     "vite": "8.3.5"
+  },
+  "dependencies": {
+    "agent-panel": "github:compdani/agent-panel#v0.3.1"
   }
 }

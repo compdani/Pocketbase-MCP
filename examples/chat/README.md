@@ -45,9 +45,10 @@ The log confirms it: `chat enabled with the OFFLINE DEMO provider … at
 
 See each example's README. Every one proxies `/api` to the server on
 `PB_URL` (default `http://127.0.0.1:8090`) and streams events through
-unbuffered. `AGENT_PANEL_DIR` (default
-`/Volumes/mini512/Components/agent-panel`) points at the agent-panel
-checkout.
+unbuffered. They use
+[agent-panel](https://github.com/compdani/agent-panel) `v0.3.1`: Vue and
+Svelte install it with `npm install`, and the plain example loads it from
+jsDelivr. Set `AGENT_PANEL_DIR` to use a local agent-panel checkout instead.
 
 ## 3. Things to try
 

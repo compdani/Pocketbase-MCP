@@ -60,4 +60,4 @@ replace github.com/compdani/pocketbase-mcp => ../../
 
 replace github.com/compdani/pocketbase-mcp/adapters/pbpostgress => ../../adapters/pbpostgress
 
-replace github.com/pocketbase/pocketbase => "/Volumes/mini512/Go Projects/pb-postgress"
+replace github.com/pocketbase/pocketbase => github.com/compdani/pb-postgress v0.41.6

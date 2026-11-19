@@ -4,7 +4,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
-import { MIME_TYPES, parsePath, startChatServer } from './serve.mjs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import { AGENT_PANEL_CDN, MIME_TYPES, parsePath, startChatServer } from './serve.mjs';
+
+/** A stand-in agent-panel checkout, so tests never depend on the network. */
+function fakeAgentPanelDir() {
+  const dir = mkdtempSync(path.join(tmpdir(), 'agent-panel-'));
+  writeFileSync(path.join(dir, 'page.js'), 'export {};\n');
+  return dir;
+}
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -57,7 +68,7 @@ test('parsePath rejects dot segments before any normalisation', () => {
 });
 
 test('static files are served with the right MIME types', async (t) => {
-  const app = await startChatServer({ port: 0 });
+  const app = await startChatServer({ port: 0, agentPanelDir: fakeAgentPanelDir() });
   t.after(() => close(app.server));
 
   const index = await rawGet(app.port, '/');
@@ -91,8 +102,20 @@ test('static files are served with the right MIME types', async (t) => {
   assert.equal(missing.status, 404);
 });
 
+test('agent-panel redirects to the pinned CDN release without AGENT_PANEL_DIR', async (t) => {
+  const app = await startChatServer({ port: 0, agentPanelDir: null });
+  t.after(() => close(app.server));
+
+  const element = await rawGet(app.port, '/agent-panel/page.js');
+  assert.equal(element.status, 302);
+  assert.equal(element.headers.location, `${AGENT_PANEL_CDN}/page.js`);
+  assert.match(AGENT_PANEL_CDN, /^https:\/\/cdn\.jsdelivr\.net\/gh\/compdani\/agent-panel@v\d+\.\d+\.\d+$/);
+
+  assert.ok((await rawGet(app.port, '/agent-panel/.git/config')).status === 403);
+});
+
 test('path traversal is rejected, literal and percent-encoded', async (t) => {
-  const app = await startChatServer({ port: 0 });
+  const app = await startChatServer({ port: 0, agentPanelDir: fakeAgentPanelDir() });
   t.after(() => close(app.server));
 
   for (const path of [
