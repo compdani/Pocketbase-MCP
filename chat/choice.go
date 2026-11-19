@@ -26,6 +26,9 @@ type ModelChoice struct {
 	// AttachmentTypes lists the canonical MIME types this choice can send.
 	// Absent means none.
 	AttachmentTypes []string `json:"attachmentTypes,omitempty"`
+	// Efforts lists the reasoning efforts a turn may request for this choice,
+	// lowest first. Absent means the model takes none.
+	Efforts []string `json:"efforts,omitempty"`
 }
 
 // ResolvedModel is a concrete provider instance and wire model for one turn.
@@ -68,6 +71,9 @@ var (
 	// ErrModelAmbiguous reports a model offered by more than one provider when
 	// the request did not name a provider.
 	ErrModelAmbiguous = errors.New("chat: model is offered by several providers")
+	// ErrEffortUnsupported reports a reasoning effort the resolved model does
+	// not list in its choice's Efforts.
+	ErrEffortUnsupported = errors.New("chat: reasoning effort is not offered for this model")
 )
 
 // ChoiceID builds the opaque public id for a provider and model. Provider ids

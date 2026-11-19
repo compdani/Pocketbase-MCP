@@ -209,6 +209,11 @@ type wireTool struct {
 
 // buildBody encodes req into the wire request.
 func (p *Provider) buildBody(req provider.Request) ([]byte, error) {
+	if req.ReasoningEffort != "" {
+		// Extended thinking is not wired up (it needs thinking blocks kept
+		// across tool calls), so an effort is refused rather than ignored.
+		return nil, fmt.Errorf("anthropic: reasoning effort is not supported: %w", provider.ErrUnsupported)
+	}
 	messages, err := wireMessages(req.Messages)
 	if err != nil {
 		return nil, err

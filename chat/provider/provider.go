@@ -78,6 +78,24 @@ type Request struct {
 	Messages        []Message `json:"messages"`
 	Tools           []ToolDef `json:"tools,omitempty"`
 	MaxOutputTokens int       `json:"maxOutputTokens,omitempty"`
+	// ReasoningEffort asks a reasoning model to think less or more. Empty
+	// means the model's default. Only providers that advertise efforts for a
+	// model accept it; others refuse the request rather than drop it.
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+}
+
+// ReasoningEfforts are the effort levels a request may name, lowest first.
+// Which ones a model accepts is per model (catalog Model.Efforts).
+var ReasoningEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+
+// ValidReasoningEffort reports whether effort is one of ReasoningEfforts.
+func ValidReasoningEffort(effort string) bool {
+	for _, e := range ReasoningEfforts {
+		if e == effort {
+			return true
+		}
+	}
+	return false
 }
 
 // Usage is the token accounting a provider may report.
@@ -145,6 +163,9 @@ var ErrUnsupported = errors.New("provider: unsupported")
 func (r Request) Validate() error {
 	if r.Model == "" {
 		return fmt.Errorf("provider: request without model")
+	}
+	if r.ReasoningEffort != "" && !ValidReasoningEffort(r.ReasoningEffort) {
+		return fmt.Errorf("provider: unknown reasoning effort %q: %w", r.ReasoningEffort, ErrUnsupported)
 	}
 	for i, m := range r.Messages {
 		if !m.Role.Valid() {

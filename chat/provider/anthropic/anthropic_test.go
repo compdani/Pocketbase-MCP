@@ -736,3 +736,19 @@ func TestEndToEndToolRoundTrip(t *testing.T) {
 		t.Fatalf("tool_result history = %+v", result.Content)
 	}
 }
+
+// Extended thinking is not wired up, so an effort is refused instead of
+// silently dropped.
+func TestReasoningEffortRefused(t *testing.T) {
+	p, err := New(Config{BaseURL: "https://example.invalid", APIKey: testKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Stream(context.Background(), provider.Request{
+		Model: "claude", ReasoningEffort: "high",
+		Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}},
+	})
+	if !errors.Is(err, provider.ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported", err)
+	}
+}

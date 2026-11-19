@@ -1312,7 +1312,7 @@ export class ChatController extends EventTarget {
     return this._track(this._send(text, options));
   }
 
-  async _send(text, { model, provider, attachments } = {}) {
+  async _send(text, { model, provider, effort, attachments } = {}) {
     const conversationId = this._state.activeConversationId;
     if (!conversationId) {
       throw new Error('ChatController.send() requires an open conversation');
@@ -1328,6 +1328,10 @@ export class ChatController extends EventTarget {
       model = selected.model;
       this._set({ choice: selected.id });
     }
+    // An effort only goes with a model that lists it; a stale pick from a
+    // previously selected model is dropped instead of failing the send.
+    const efforts = selected && Array.isArray(selected.efforts) ? selected.efforts : [];
+    if (typeof effort !== 'string' || !efforts.includes(effort)) effort = undefined;
     const epoch = this._epoch;
     let attachmentIds = [];
     if (Array.isArray(attachments) && attachments.length > 0) {
@@ -1345,6 +1349,7 @@ export class ChatController extends EventTarget {
           text,
           provider,
           model,
+          effort,
           attachments: attachmentIds.length > 0 ? attachmentIds : undefined,
           idempotencyKey,
         });

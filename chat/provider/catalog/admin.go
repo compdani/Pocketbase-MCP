@@ -183,7 +183,7 @@ func applyInput(p Provider, in chat.ProviderInput) Provider {
 	if in.Models != nil {
 		models := make([]Model, 0, len(*in.Models))
 		for _, m := range *in.Models {
-			models = append(models, Model{ID: m.ID, Label: m.Label})
+			models = append(models, Model{ID: m.ID, Label: m.Label, Efforts: m.Efforts})
 		}
 		p.Models = models
 	}
@@ -308,6 +308,13 @@ func (a *Admin) RefreshProviderModels(ctx context.Context, id string, save bool)
 	if save {
 		if len(models) == 0 {
 			return nil, a.bad("The provider returned no models; the current list was kept.")
+		}
+		// Discovery may not know a model's efforts; keep ones an
+		// administrator set rather than wiping them on refresh.
+		for i, m := range models {
+			if old, ok := p.Model(m.ID); ok && len(m.Efforts) == 0 && len(old.Efforts) > 0 {
+				models[i].Efforts = old.Efforts
+			}
 		}
 		p.Models = models
 		if _, ok := p.Model(p.DefaultModel); !ok {
@@ -528,7 +535,7 @@ func (a *Admin) discover(ctx context.Context, p Provider) ([]Model, error) {
 		}
 		out := make([]Model, 0, len(list))
 		for _, m := range list {
-			out = append(out, Model{ID: m.Slug, Label: m.DisplayName})
+			out = append(out, Model{ID: m.Slug, Label: m.DisplayName, Efforts: NormalizeEfforts(m.Efforts)})
 		}
 		return out, nil
 	}
@@ -588,7 +595,11 @@ func (a *Admin) listHTTPModels(ctx context.Context, p Provider, endpoint string,
 		if label == "" {
 			label = id
 		}
-		out = append(out, Model{ID: id, Label: label})
+		efforts := reasoningLevels(m["supported_reasoning_levels"])
+		if len(efforts) == 0 && !anthropic {
+			efforts = DefaultEfforts(id)
+		}
+		out = append(out, Model{ID: id, Label: label, Efforts: NormalizeEfforts(efforts)})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
@@ -597,7 +608,7 @@ func (a *Admin) listHTTPModels(ctx context.Context, p Provider, endpoint string,
 func toOptions(models []Model) []chat.ModelOption {
 	out := make([]chat.ModelOption, 0, len(models))
 	for _, m := range models {
-		out = append(out, chat.ModelOption{ID: m.ID, Label: m.Label})
+		out = append(out, chat.ModelOption{ID: m.ID, Label: m.Label, Efforts: m.Efforts})
 	}
 	return out
 }
@@ -634,4 +645,25 @@ func (a *Admin) storeError(err error) error {
 	default:
 		return a.internal(err)
 	}
+}
+
+// reasoningLevels reads a model list's supported_reasoning_levels, which is
+// either a list of effort names or a list of {"effort": ...} objects.
+func reasoningLevels(v any) []string {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, item := range list {
+		switch x := item.(type) {
+		case string:
+			out = append(out, x)
+		case map[string]any:
+			if e, ok := x["effort"].(string); ok {
+				out = append(out, e)
+			}
+		}
+	}
+	return out
 }

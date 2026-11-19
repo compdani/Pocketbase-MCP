@@ -57,6 +57,8 @@ type ProviderInput struct {
 type ModelOption struct {
 	ID    string `json:"id"`
 	Label string `json:"label,omitempty"`
+	// Efforts lists the reasoning efforts the model accepts; empty means none.
+	Efforts []string `json:"efforts,omitempty"`
 }
 
 // ProviderTest is the outcome of a provider reachability/auth check.
