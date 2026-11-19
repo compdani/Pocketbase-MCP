@@ -233,6 +233,11 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 			cfg.RunnerConfig.Router = router
 		}
 		cfg.RunnerConfig.System = cfg.System
+		if cfg.RunnerConfig.Logger == nil {
+			// Failed turns record only a generic message; the cause goes to
+			// the app log, next to PocketBase's own request log.
+			cfg.RunnerConfig.Logger = s.Adapter.app.Logger()
+		}
 		if opts.Proposals && cfg.RunnerConfig.Proposals == nil {
 			cfg.RunnerConfig.Proposals = proposals
 		}
