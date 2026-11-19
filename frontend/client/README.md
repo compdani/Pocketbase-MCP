@@ -106,6 +106,27 @@ element's options menu while the selected model has efforts ("Model default"
 sends none), keeps any options the host set itself, and passes the pick on
 each `agent-submit`. `effortOptionFromState(state, model)` returns that entry.
 
+## Page context
+
+When the server turns on `TurnContext`, `/status` reports `features.context`
+and each turn may carry a plain object describing the user's page. Give the
+controller a `context` function; it is read once per send (retries reuse the
+same value) and only when the server accepts contexts:
+
+```js
+const chat = new ChatController({
+  client,
+  context: () => ({ screen: 'campaign-editor', campaignId, editorRevision: editor.revision, selection: editor.selectedText() }),
+});
+await chat.send('Tighten the intro'); // sends the context above
+await chat.send('Hi', { context: { screen: 'dashboard' } }); // overrides it
+```
+
+The server decides what the context changes (the system prompt, the limits);
+it never grants access by itself. A server can refuse a turn for its context
+with `400 turn_refused`, which surfaces as a `ChatApiError` with the server's
+message.
+
 ## API
 
 ### `ChatClient`
@@ -259,13 +280,15 @@ render, instead of making every consumer walk `messages[].parts` itself.
 
 ### `bindAgentPanel` / entry mapping
 
-> **Requires agent-panel v0.4.0 or later.** Install it with
-> `npm install github:compdani/agent-panel#v0.4.0`. 0.4.0 adds the panel's
+> **Requires agent-panel v0.4.0 or later; v0.4.1 recommended.** Install it with
+> `npm install github:compdani/agent-panel#v0.4.1`. 0.4.0 adds the panel's
 > conversation switcher (`conversations-menu`, with delete), the built-in
 > "Load more" (`has-more` / `agent-load-more`), and the panel's
 > `conversations` / `active` properties that the list sync writes. With 0.3.x,
 > `<agent-panel>` shows no conversation list and the page's list has no
-> "Load more".
+> "Load more". 0.4.1 changes only the panel's look: the switcher becomes the
+> header title (with New chat beside Close), the `switcher-end` slot and the
+> `floating` attribute are new, and the binding needs no change for them.
 
 Binds one controller to one `<agent-panel>` or `<agent-page>` from
 [`agent-panel`](https://github.com/compdani/agent-panel). The element is passed
@@ -286,11 +309,18 @@ binding.unbind();
 chat.dispose();
 ```
 
-A side panel gets the same list with agent-panel's switcher (a dropdown
-of conversations, each with Delete, plus New chat):
+A side panel gets the same list with agent-panel's switcher: the header's
+title becomes the open conversation's title and a chevron, opening a dropdown
+of conversations (each with its date and Delete), with New chat beside Close.
+`heading` is shown only while there are no conversations yet; put a fixed mark
+in `header-start` (it stays before the switcher), and actions under the list in
+`switcher-end`. `floating` (0.4.1) draws the panel as a card over the page:
 
 ```html
-<agent-panel heading="Assistant" conversations-menu closable></agent-panel>
+<agent-panel heading="Assistant" conversations-menu floating closable>
+  <span slot="header-start" aria-hidden="true">✦</span>
+  <button slot="switcher-end" type="button">Open in the full page</button>
+</agent-panel>
 ```
 
 ```js
@@ -312,7 +342,7 @@ On every controller `change` it writes:
 | `models` | `state.models`, for the model menu. |
 | `no-attachments`, `accept`, `max-file-size`, `max-files` | Attachment attributes mirrored from `/status` once it answers; `no-attachments` when uploads are off or no type is accepted. |
 | `conversations`, `active`, `hasMore` | The list rows, the selected id, and whether "Load more" shows (`nextCursor`). On `<agent-page>` and `<agent-panel>` (shown with its `conversations-menu` attribute). |
-| `heading` | Page only: the open conversation's title. A panel keeps the heading the host gave it. |
+| `heading` | Page only: the open conversation's title. A panel keeps the heading the host gave it (with `conversations-menu`, the switcher shows the conversation's title in its place). |
 
 Entry shapes follow agent-panel's `element.d.ts`, plus two custom types the
 binding registers with `defineEntry()`:

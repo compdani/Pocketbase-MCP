@@ -103,6 +103,14 @@ type ChatOptions struct {
 	// MaxUploadsPerConversation bounds how many uploads one conversation may
 	// keep. Zero means the chat default (50).
 	MaxUploadsPerConversation int
+	// TurnContext accepts a page context object on each turn (the screen,
+	// selection, editor revision and the like). The runner's Setup hook
+	// receives it; without a hook it is appended to the system prompt as
+	// data. Off means a turn with a context is rejected.
+	TurnContext bool
+	// MaxContextBytes bounds one turn's context. Zero means the chat default
+	// (16 KiB).
+	MaxContextBytes int
 }
 
 // ChatHandler builds the chat HTTP handler. It authenticates a bearer token the
@@ -148,6 +156,8 @@ func (s *Server) ChatHandler(opts ChatOptions) (http.Handler, error) {
 		MaxUploadBytes:            opts.MaxUploadBytes,
 		MaxAttachmentsPerTurn:     opts.MaxAttachmentsPerTurn,
 		MaxUploadsPerConversation: opts.MaxUploadsPerConversation,
+		TurnContext:               opts.TurnContext,
+		MaxContextBytes:           opts.MaxContextBytes,
 	})
 }
 
@@ -495,6 +505,9 @@ func (e *chatToolExecutor) resolveWrite(ctx context.Context, name string, args j
 		if msg := validateCustomArgs(desc.custom, in); msg != "" {
 			return writeCall{}, chat.ToolError{Message: msg}
 		}
+		if msg := runToolValidate(ctx, desc.custom, p, in); msg != "" {
+			return writeCall{}, chat.ToolError{Message: "Invalid params: " + msg}
+		}
 		if desc.editor() {
 			// The editor a patch targets is part of the proposal identity, so
 			// it must name something even though the schema only requires a
@@ -556,7 +569,7 @@ func (e *chatToolExecutor) Plan(ctx context.Context, name string, args json.RawM
 			Location:         chat.ProposalLocationEditor,
 			Target:           call.editorID,
 			Arguments:        call.canonicalArgs(),
-			Summary:          call.desc.chatEditSummary(call.editorID),
+			Summary:          call.desc.chatEditSummary(call.editorID, call.args),
 			OnStored:         audit("", ""),
 		}, nil
 	}

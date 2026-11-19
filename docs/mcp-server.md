@@ -48,12 +48,15 @@ Two adapters implement that interface:
 
 | Adapter | Host | OAuth |
 |---|---|---|
-| `adapters/pocketbase` | Stock PocketBase v0.40.1 | Installs `auth/stockoauth` (module mode) |
+| `adapters/pocketbase` | Stock PocketBase v0.41.1 (`ganigeorgiev.com/pocketbase/pocketbase`) | Installs `auth/stockoauth` (module mode) |
 | `adapters/pbpostgress` | The pb-postgress fork | Reuses the fork's own OAuth2 server (native mode) |
 
-The fork declares the same module path as stock PocketBase
-(`github.com/pocketbase/pocketbase`), so an app picks the fork with a
-`replace` directive in its own `go.mod`. **Never create a `go.work` that
+PocketBase moved to its own host at v0.41: stock PocketBase is now
+`ganigeorgiev.com/pocketbase/pocketbase` (with `ganigeorgiev.com/pocketbase/dbx`).
+The fork still declares the old path (`github.com/pocketbase/pocketbase`), so
+an app picks the fork with a `replace` directive in its own `go.mod`. When the
+fork is rebased onto v0.41 or later, the fork adapter and example move to the
+new path too. **Never create a `go.work` that
 includes both adapters or both examples**: one binary can't contain two
 implementations of the same module path.
 
@@ -304,6 +307,54 @@ manifest, policy, field and record-rule checks as the generated tools.
 A handler returns a plain value (sent as `structuredContent` plus a JSON text
 rendering) or a `protocol.ToolResult` to add embedded resources (base64
 `blob` plus `mimeType`) and resource links.
+
+### Hosts with their own permission checks
+
+Some apps check permissions in their own route handlers (roles, list-scoped
+access) rather than in collection rules. For those, don't expose the
+collections in the manifest: generated tools only see collection rules, and
+a rule like `@request.auth.id != ""` would skip the app's own checks. Write
+custom tools that run the app's handlers as the caller instead. Each adapter
+has a helper for that:
+
+```go
+Handler: func(ctx context.Context, call pbmcp.CallContext, args map[string]any) (any, error) {
+    caller, err := pb.ResolveCaller(app, call) // re-validates the token
+    if err != nil {
+        return nil, err // pbmcp.Denied: "Sign in again to use this tool."
+    }
+    e, rec := caller.RequestEvent(ctx, http.MethodGet, "/api/things?page=1", nil)
+    if err := myapp.ListThings(e); err != nil { // the app's own handler
+        return nil, err
+    }
+    return json.RawMessage(rec.Body.Bytes()), nil
+},
+```
+
+`ResolveCaller` validates the call's token again, so a token revoked after
+the turn or request began (password change, deleted user) is refused, and
+it returns the user's record as it is now. `RequestEvent` builds a request
+event signed in as that user, with the token in its `Authorization` header,
+the tool's context (timeout and cancellation) and a recorder for the
+response. Set path values with `e.Request.SetPathValue` if the handler reads
+them, and put any app-specific values the handler expects on the event
+(`e.Set(...)`) before calling it.
+
+### Argument checks and proposal summaries
+
+Two optional hooks cover what a schema can't:
+
+- `Validate(ctx, principal, args) error` runs after the input schema
+  passes: before the handler on MCP and chat, and before a chat write or
+  editor call becomes a proposal (and again when a proposal is edited or
+  approved). Use it for checks such as "each block appears in one operation".
+  Return `pbmcp.Invalid(msg)` or a `ToolError` to give the model the reason;
+  any other error is shown as "the arguments were refused". It must not have
+  side effects.
+- `Summarize(args) string` writes the one-line description a reviewer sees
+  on a chat proposal, for example "replace hero, insert cta". The tool's
+  title and the "(changes data)" or "(applies in the editor after approval)"
+  marker stay around it, and it is trimmed to one line of 300 characters.
 
 ### Gates
 

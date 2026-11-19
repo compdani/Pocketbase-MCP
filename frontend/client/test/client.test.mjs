@@ -165,6 +165,17 @@ test('submitTurn sends a reasoning effort only when one is named', async () => {
   assert.deepEqual(JSON.parse(fetch.calls[1].body), { text: 'default', model: 'gpt-5' });
 });
 
+test('submitTurn sends a page context object and refuses other shapes', async () => {
+  const fetch = fakeFetch(() => jsonResponse({ turn, created: true }, 202));
+  const client = new ChatClient({ baseUrl: 'https://api.test', getToken: () => 't', fetch });
+  await client.submitTurn('c1', { text: 'here', context: { route: '/campaigns/7' } });
+  await client.submitTurn('c1', { text: 'none', context: null });
+  assert.deepEqual(JSON.parse(fetch.calls[0].body), { text: 'here', context: { route: '/campaigns/7' } });
+  assert.deepEqual(JSON.parse(fetch.calls[1].body), { text: 'none' });
+  await assert.rejects(client.submitTurn('c1', { text: 'bad', context: ['x'] }), TypeError);
+  assert.equal(fetch.calls.length, 2);
+});
+
 test('newIdempotencyKey produces distinct UUIDs', () => {
   const keys = new Set(Array.from({ length: 50 }, () => newIdempotencyKey()));
   assert.equal(keys.size, 50);

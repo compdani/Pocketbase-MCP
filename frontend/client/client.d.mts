@@ -242,6 +242,11 @@ export interface SubmitTurnOptions extends RequestOptions {
   effort?: string;
   /** Upload ids returned by uploadFile(). */
   attachments?: string[];
+  /**
+   * Page context for this turn (route, selection, editor revision...). Only
+   * accepted when the server's status reports `features.context`.
+   */
+  context?: Record<string, unknown> | null;
   idempotencyKey?: string;
 }
 

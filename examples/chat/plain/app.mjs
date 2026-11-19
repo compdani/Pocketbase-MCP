@@ -137,6 +137,13 @@ function setSideOpen(open) {
 
 toggleSide.addEventListener('click', () => setSideOpen(side.hidden));
 side.addEventListener('agent-close', () => setSideOpen(false));
+// The switcher-end slot: open the panel's conversation in the full page.
+document.getElementById('side-open-page').addEventListener('click', async () => {
+  side.closeConversations();
+  const id = session?.sideController.state.activeConversationId;
+  if (session && id) await session.controller.open(id);
+  setSideOpen(false);
+});
 
 function showLogin() {
   appView.hidden = true;

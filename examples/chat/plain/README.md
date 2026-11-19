@@ -7,9 +7,13 @@ A page with no build step and no dependencies:
 - a **note editor** next to the chat that implements the controller's editor
   adapter, so editor proposals can be approved and applied;
 - a **side panel** (the **Side panel** button): an `<agent-panel
-  conversations-menu>` with its own controller, the way an app's global
-  assistant sits beside a full chat page. Its conversation switcher (with
-  delete) and the page's sidebar stay in step: see [List sync](#list-sync);
+  conversations-menu floating>` with its own controller, the way an app's
+  global assistant sits beside a full chat page. `floating` draws it as a card
+  over the page. Its header title is the conversation switcher (a dropdown with
+  each conversation's date and Delete; New chat sits beside Close), a `✦` mark
+  sits in `header-start`, and the `switcher-end` slot adds **Open in the full
+  page**, which opens the panel's conversation in the `<agent-page>`. The
+  switcher and the page's sidebar stay in step: see [List sync](#list-sync);
 - `serve.mjs`, a tiny dev server that serves the page, the client and the
   local agent-panel on one origin and proxies `/api/` to PocketBase.
 
@@ -28,7 +32,7 @@ node examples/chat/plain/serve.mjs   # http://127.0.0.1:5174
 |---|---|---|
 | `PORT` | `5174` | Port on `127.0.0.1` |
 | `PB_URL` | `http://127.0.0.1:8090` | Where `/api/` is proxied |
-| `AGENT_PANEL_DIR` | unset: `/agent-panel/` redirects to agent-panel `v0.4.0` on jsDelivr | A local agent-panel checkout to serve at `/agent-panel/` instead |
+| `AGENT_PANEL_DIR` | unset: `/agent-panel/` redirects to agent-panel `v0.4.1` on jsDelivr | A local agent-panel checkout to serve at `/agent-panel/` instead |
 
 ## The note editor
 

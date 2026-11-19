@@ -47,8 +47,8 @@ The log confirms it: `chat enabled with the OFFLINE DEMO provider … at
 See each example's README. Every one proxies `/api` to the server on
 `PB_URL` (default `http://127.0.0.1:8090`) and streams events through
 unbuffered. They use
-[agent-panel](https://github.com/compdani/agent-panel) `v0.4.0` (the
-minimum the binding supports): Vue and
+[agent-panel](https://github.com/compdani/agent-panel) `v0.4.1` (the binding
+needs `v0.4.0` or later): Vue and
 Svelte install it with `npm install`, and the plain example loads it from
 jsDelivr. Set `AGENT_PANEL_DIR` to use a local agent-panel checkout instead.
 
@@ -69,7 +69,8 @@ draft: the first message creates the conversation. The sidebar ends with
 agent-panel's built-in **Load more** while the server has another page.
 
 **The list stays in sync.** Open the plain example's **Side panel** (an
-`<agent-panel conversations-menu>` with its own controller), or a second tab:
+`<agent-panel conversations-menu floating>` with its own controller: its header
+title is the conversation switcher, with New chat beside Close), or a second tab:
 a chat started, renamed or deleted in one view appears in the other. Each
 controller re-reads the list after every turn, on focus and once a minute,
 and tells the others for the same account over a `BroadcastChannel`.

@@ -62,7 +62,7 @@ type ChatConfig struct {
 	// for its own collections when supplied.
 	ProviderStore catalog.Store
 	// RunnerConfig supplies optional runner limits (steps, timeout, worker
-	// bounds, history). Its Store, Provider, Model and System fields are
+	// bounds, history, output tokens) and the per-turn Setup hook. Its Store, Provider, Model and System fields are
 	// overridden by this config. A custom Options.Runner that resolves a
 	// catalog must also receive Options.Router; the adapter cannot infer it.
 	RunnerConfig chat.RunnerConfig

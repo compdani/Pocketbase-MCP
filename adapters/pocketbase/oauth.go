@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/pocketbase/pocketbase/core"
-	"github.com/pocketbase/pocketbase/tools/router"
+	"ganigeorgiev.com/pocketbase/pocketbase/core"
+	"ganigeorgiev.com/pocketbase/pocketbase/tools/router"
 
 	pbmcp "github.com/compdani/pocketbase-mcp"
 	"github.com/compdani/pocketbase-mcp/auth/stockoauth"

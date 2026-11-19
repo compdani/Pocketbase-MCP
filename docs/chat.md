@@ -80,6 +80,7 @@ recovers from a previous crash (section 4) and mounts the API.
 | `MaxUploadBytes`, `MaxAttachmentsPerTurn`, `MaxUploadsPerConversation` | Upload limits (defaults 10 MiB, 5, 50). |
 | `MaxBodyBytes`, `MaxMessageChars`, `HeartbeatInterval` | Request size (64 KiB), message length (16,000 characters), SSE heartbeat (15s). |
 | `TargetCheck` | Optional check that a caller may use a conversation's target record. |
+| `TurnContext`, `MaxContextBytes` | Accept a page context object on each turn (section 3), up to 16 KiB by default. Off means a turn with a context is rejected. |
 
 Startup refuses inconsistent settings: proposals without `AllowWrites` (when
 server writes are possible), proposals or uploads with a store or runner that
@@ -100,7 +101,7 @@ ever read from that header, never from a URL.
 | `GET /conversations/{id}` | Transcript plus open proposals |
 | `PATCH /conversations/{id}` | Rename |
 | `DELETE /conversations/{id}` | Cancel active work, then delete it with its proposals and uploads |
-| `POST /conversations/{id}/turns` | Send a message (with an idempotency key and optional attachments); returns the turn |
+| `POST /conversations/{id}/turns` | Send a message (with an idempotency key, optional attachments and, when `TurnContext` is on, a page `context` object); returns the turn |
 | `GET /turns/{id}` | The turn's current state |
 | `GET /turns/{id}/events?after=N` | Server-sent events: replay after `N`, then live |
 | `POST /turns/{id}/cancel` | Stop a queued or running turn |
@@ -170,6 +171,46 @@ step.
 
 **History.** The model gets the last 50 stored messages, never splitting a
 tool call from its result.
+
+**Page context.** With `TurnContext` on, a turn may carry a `context` object
+describing what the user is looking at: the screen, filters, selected text,
+the editor's revision, mentioned records. `/status` then reports
+`features.context` and `limits.maxContextBytes`. The context is used for that
+turn only and is never stored. It comes from the browser, so treat it like the
+message text: it can't grant anything, and records it names should be read
+through permission-checked tools.
+
+**Per-turn setup.** `RunnerConfig.Setup` is a host hook that runs once per new
+turn, before anything is stored, with the owner, conversation and its target,
+the message, the context and the resolved model. It returns a `TurnSetup`:
+
+```go
+RunnerConfig: chat.RunnerConfig{
+    MaxOutputTokens: 16000,
+    Setup: func(ctx context.Context, in chat.TurnInput) (chat.TurnSetup, error) {
+        var page struct{ Screen string `json:"screen"` }
+        _ = json.Unmarshal(in.Context, &page)
+        switch page.Screen {
+        case "agent":
+            return chat.TurnSetup{System: agentPrompt + "\n\n" + chat.ContextBlock(in.Context),
+                MaxSteps: 16, TurnTimeout: time.Hour, MaxOutputTokens: 128000}, nil
+        case "settings":
+            return chat.TurnSetup{}, chat.RefuseTurn("The assistant isn't available on this screen.")
+        }
+        return chat.TurnSetup{}, nil // defaults
+    },
+},
+```
+
+Zero fields keep the runner's values. An empty `System` means the default:
+`RunnerConfig.System` followed by `chat.ContextBlock(context)`, which labels
+the context as data, not instructions. That default also applies when there's
+no hook. `RefuseTurn` answers `400 turn_refused` with the host's message; any
+other hook error is a `500` with a generic message, logged as `chat: turn
+setup failed`. A refused turn stores nothing. The browser never sets limits
+itself; only the host's hook does, so pick them from what the context says
+about the screen, not from numbers it carries. The `OwnerKey` in `TurnInput`
+names the user (`AuthCollectionID`, `UserID`) if the hook needs the record.
 
 **Failures.** A failed turn records one of `provider_error` (the provider
 refused the request or its stream broke), `max_steps`, `timeout`,
@@ -294,6 +335,16 @@ respond. The browser then applies the patch and reports back with
 record a partial result. This report is an acknowledgement, not proof that
 anything was saved: saving still goes through the app's normal API, and the
 note to the model always says "not saved yet".
+
+**Structured patches.** Beyond `editorId` and `baseRevision`, the patch format
+is the tool's own: text replacements, block operations by block ID, graph
+node and edge upserts. The browser's editor adapter (`validatePatch`,
+`applyPatch`) applies it, and hunk IDs can be block or node IDs. On the server,
+the tool's `Validate` hook checks what a schema can't (such as one operation
+per block) before the call becomes a proposal, and `Summarize` writes what
+the reviewer sees, for example "Edit blocks: replace hero, insert cta in body
+(applies in the editor after approval)". See
+[mcp-server.md](mcp-server.md#argument-checks-and-proposal-summaries).
 
 ## 7. Uploads
 
@@ -493,14 +544,18 @@ browser package:
 - `ChatController`: framework-neutral state (conversations, transcript,
   proposals, uploads, limits, errors) with `send`, `stop`, `decide`, `attach`
   and an **editor adapter** (`snapshot`, `validatePatch`, `applyPatch`) that
-  applies approved editor proposals and reports the outcome.
+  applies approved editor proposals and reports the outcome. Its `context`
+  option is a function read once per send for the page context, sent only
+  when the server reports `features.context`; `send(text, { context })`
+  overrides it.
 - `bindAgentPanel`: connects the controller to the `<agent-panel>` /
   `<agent-page>` web components: approve and reject buttons, outcome notes,
   attachment chips and composer limits taken from `/status`, and the
   conversation list (the page's sidebar, or the panel's `conversations-menu`
-  switcher). It requires
-  [agent-panel](https://github.com/compdani/agent-panel) **v0.4.0 or later**
-  (`npm install github:compdani/agent-panel#v0.4.0`).
+  switcher, which since agent-panel 0.4.1 is the panel's header title). It
+  requires [agent-panel](https://github.com/compdani/agent-panel) **v0.4.0 or
+  later**; the examples pin v0.4.1
+  (`npm install github:compdani/agent-panel#v0.4.1`).
 - **List sync**: each controller re-reads its conversation list after a turn
   ends, on focus and once a minute while visible, and announces its own
   changes to other controllers for the same account (other elements on the
@@ -538,7 +593,11 @@ Runner defaults (`chat.RunnerConfig`):
 | `TurnTimeout` | 2 minutes |
 | `MaxConcurrentPerUser` / `MaxConcurrentGlobal` | 2 / 16 |
 | `MaxHistoryMessages` | 50 |
+| `MaxOutputTokens` (per model step) | Provider default. Not sent on the Responses wire or the Codex plan route, which don't accept one. |
 | `ProposalTTL` | 24 hours |
 | `MaxAttachmentBytesPerRequest` | 20 MiB |
+
+`Setup` (section 3) can change `MaxSteps`, `TurnTimeout`, `MaxOutputTokens`,
+`MaxHistoryMessages` and the system prompt for each turn.
 
 Known gaps are listed in [roadmap.md](roadmap.md#known-gaps).

@@ -10,7 +10,7 @@ Updated 2026-11-19.
 | Item | Pin |
 |---|---|
 | Root module | `github.com/compdani/pocketbase-mcp`, standard library only, `go 1.26` |
-| Stock PocketBase | `github.com/pocketbase/pocketbase v0.40.1` (what customjs builds against) |
+| Stock PocketBase | `ganigeorgiev.com/pocketbase/pocketbase v0.41.1` and `ganigeorgiev.com/pocketbase/dbx v1.13.0`. PocketBase moved to this host at v0.41; v0.40.1 and earlier were `github.com/pocketbase/pocketbase`. |
 | Fork | `github.com/compdani/pb-postgress` `master` at `c047535c` (merge of PR #4, `oauth-mcp-clients`), tagged and pinned as `v0.41.6` |
 | Go toolchain | `go1.26.5`. Modules that depend on PocketBase (adapters, `auth/stockoauth`, examples) declare `go 1.27` and switch to `go1.27.0` automatically. |
 | Databases tested | SQLite (stock), PostgreSQL 14 (fork). **MySQL is untested.** |
@@ -128,6 +128,9 @@ race in the fork's own background logging; the real fix belongs in the fork.
 customjs becomes the first app on this module. Keep what ChatGPT is
 configured against:
 
+- **Same PocketBase:** the stock adapter now builds against v0.41.1 on the
+  new `ganigeorgiev.com` path. Move customjs off v0.40.1 first if it is
+  still there; one binary can't contain both module paths.
 - **Same paths:** `/mcp`, `/sse`, `/oauth/login`, `/oauth/token`,
   `/oauth/userinfo` and root discovery, through config.
 - **Same clients:** import each `oauth_apps` record with its full callback

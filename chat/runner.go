@@ -105,6 +105,17 @@ type RunnerConfig struct {
 	// MaxHistoryMessages bounds the transcript sent to the model, counted in
 	// stored messages. Zero means 50.
 	MaxHistoryMessages int
+	// MaxOutputTokens bounds the tokens one model step may generate. Zero
+	// leaves the provider's default (the Anthropic adapter's own default).
+	// The Responses wire and the ChatGPT/Codex plan route do not accept an
+	// output bound, so it is not sent there.
+	MaxOutputTokens int
+	// Setup, when set, decides each new turn's system prompt and limits from
+	// the turn's input, including the page context the browser sent. It runs
+	// once per submission, before anything is stored; RefuseTurn refuses the
+	// turn with a message for the user. Nil means every turn uses System
+	// (followed by ContextBlock of the page context) and the limits above.
+	Setup func(ctx context.Context, in TurnInput) (TurnSetup, error)
 	// Proposals makes the runner store a reviewed proposal instead of running
 	// a call an executor plans for review. It is optional and additive: a nil
 	// store leaves turns exactly as they were, and an executor that returns a
@@ -203,6 +214,7 @@ type turnJob struct {
 	effort         string
 	tools          ToolExecutor
 	deadline       time.Time
+	settings       turnSettings
 	done           chan struct{}
 	// title is closed when this turn's title attempt ends; nil when none runs.
 	title chan struct{}
@@ -384,6 +396,12 @@ type SubmitOptions struct {
 	// deadline earlier than the turn timeout ends the turn as auth_expired, so
 	// a worker never acts with an expired token.
 	Deadline time.Time
+	// Context is the page context the browser sent with the turn, a JSON
+	// object or nil. It is given to RunnerConfig.Setup and, by default,
+	// appended to the system prompt as data. It is never stored.
+	Context json.RawMessage
+	// ConversationTarget is the conversation's target, for Setup.
+	ConversationTarget string
 }
 
 // SubmitWithOptions is the option-taking form of Submit. It exists because a
@@ -419,6 +437,19 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 	effort := strings.TrimSpace(opts.Effort)
 	if effort != "" && !slices.Contains(resolved.Choice.Efforts, effort) {
 		return Turn{}, false, ErrEffortUnsupported
+	}
+	settings, err := r.settingsFor(ctx, TurnInput{
+		Owner:              owner,
+		ConversationID:     conversationID,
+		ConversationTarget: opts.ConversationTarget,
+		Text:               opts.Text,
+		Context:            opts.Context,
+		Provider:           resolved.Choice.Provider,
+		Model:              resolved.Model,
+		Effort:             effort,
+	})
+	if err != nil {
+		return Turn{}, false, err
 	}
 	turn, created, err := r.cfg.Store.CreateTurn(ctx, owner, Turn{
 		ConversationID: conversationID,
@@ -472,6 +503,7 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 		effort:         effort,
 		tools:          opts.Tools,
 		deadline:       opts.Deadline,
+		settings:       settings,
 		done:           make(chan struct{}),
 		title:          title,
 	}
@@ -697,7 +729,7 @@ func (r *Runner) startLocked(j *turnJob) {
 	// The worker's lifetime is its own: never the submission request's context.
 	// It ends at the turn timeout or at the caller's credential deadline,
 	// whichever comes first, and remembers which one applied.
-	timeout := r.cfg.TurnTimeout
+	timeout := j.settings.timeout
 	j.authBound = false
 	if !j.deadline.IsZero() {
 		remaining := j.deadline.Sub(r.now())
@@ -775,7 +807,7 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 	}
 
 	for step := 0; ; step++ {
-		if step >= r.cfg.MaxSteps {
+		if step >= j.settings.maxSteps {
 			r.failJob(j, FailureMaxSteps, nil)
 			return
 		}
@@ -1232,7 +1264,7 @@ func (r *Runner) failJob(j *turnJob, code string, cause error) {
 		attrs = append(attrs, "error", cause.Error())
 	}
 	if code == FailureMaxSteps {
-		attrs = append(attrs, "maxSteps", r.cfg.MaxSteps)
+		attrs = append(attrs, "maxSteps", j.settings.maxSteps)
 	}
 	r.cfg.Logger.Warn("chat: turn failed", attrs...)
 	r.finishJob(j, TurnStateRunning, TurnStateFailed, code)
@@ -1320,9 +1352,10 @@ func (r *Runner) buildRequest(ctx context.Context, j *turnJob) (provider.Request
 	}
 	return provider.Request{
 		Model:           j.model,
-		System:          r.cfg.System,
+		System:          j.settings.system,
 		Messages:        messages,
 		Tools:           defs,
+		MaxOutputTokens: j.settings.maxOutputTokens,
 		ReasoningEffort: j.effort,
 	}, nil
 }
@@ -1336,7 +1369,7 @@ func (r *Runner) history(ctx context.Context, j *turnJob) ([]provider.Message, e
 	if err != nil {
 		return nil, err
 	}
-	stored = trimHistory(stored, r.cfg.MaxHistoryMessages)
+	stored = trimHistory(stored, j.settings.maxHistoryMessages)
 	return normalizeHistory(providerMessagesWith(stored, r.resolveAttachments(ctx, j, stored))), nil
 }
 
@@ -1406,7 +1439,7 @@ func (r *Runner) allMessages(ctx context.Context, j *turnJob) ([]Message, error)
 	if fast, ok := r.cfg.Store.(RecentMessageStore); ok {
 		// trimHistory keeps at most MaxHistoryMessages, so reading more is
 		// wasted work on every model step.
-		return fast.RecentMessages(ctx, j.owner, j.conversationID, r.cfg.MaxHistoryMessages)
+		return fast.RecentMessages(ctx, j.owner, j.conversationID, j.settings.maxHistoryMessages)
 	}
 	var all []Message
 	page := Page{Limit: maxPageLimit}

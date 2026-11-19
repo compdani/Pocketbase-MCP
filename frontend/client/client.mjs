@@ -299,8 +299,11 @@ export class ChatClient {
    * An idempotency key is generated when the caller did not supply one. Retrying
    * with the same key can never create a second turn. `attachments` are upload
    * ids returned by uploadFile(); the server re-validates every reference.
+   * `context` is a plain object describing the user's page (route, selection,
+   * editor revision); it is sent only when the server reports
+   * `features.context`, and the server rejects it otherwise.
    */
-  async submitTurn(conversationId, { text, provider, model, effort, attachments, idempotencyKey, signal } = {}) {
+  async submitTurn(conversationId, { text, provider, model, effort, attachments, context, idempotencyKey, signal } = {}) {
     const key = idempotencyKey || newIdempotencyKey();
     const body = { text };
     if (provider !== undefined && provider !== '') body.provider = provider;
@@ -308,6 +311,12 @@ export class ChatClient {
     if (typeof effort === 'string' && effort !== '') body.effort = effort;
     if (Array.isArray(attachments) && attachments.length > 0) {
       body.attachments = attachments.map((id) => String(id));
+    }
+    if (context !== undefined && context !== null) {
+      if (typeof context !== 'object' || Array.isArray(context)) {
+        throw new TypeError('submitTurn context must be a plain object');
+      }
+      body.context = context;
     }
     const result = await this._json('POST', `/conversations/${encodeSegment(conversationId)}/turns`, {
       body,

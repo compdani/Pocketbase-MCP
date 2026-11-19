@@ -1083,6 +1083,44 @@ test('attach checks the union, or the named model; send checks the model it send
   assert.equal((await controller.attach([png()], { model: 'b::m2' })).length, 1);
 });
 
+test('send carries page context only when the server accepts it', async () => {
+  for (const accepts of [true, false]) {
+    const client = makeClient();
+    client.statusResult = { ...STATUS, features: { ...STATUS.features, context: accepts } };
+    client.detailResult = detail(conversation('c1'), []);
+    client.submitResult = { turn: turn('queued'), created: true };
+    client.streamTurn = async () => ({ lastSeq: 0, terminal: true });
+    let reads = 0;
+    const controller = new ChatController({
+      client,
+      context: async () => {
+        reads += 1;
+        return { route: '/campaigns/7' };
+      },
+    });
+    await controller.init();
+    await controller.open('c1');
+
+    await controller.send('one');
+    await settle(controller);
+    await controller.send('two', { context: { route: '/override' } });
+    await settle(controller);
+
+    const sent = client.calls.filter((c) => c.method === 'submitTurn').map((c) => c.options.context);
+    if (accepts) {
+      assert.deepEqual(sent, [{ route: '/campaigns/7' }, { route: '/override' }]);
+      assert.equal(reads, 1);
+    } else {
+      assert.deepEqual(sent, [undefined, undefined]);
+      assert.equal(reads, 0);
+    }
+  }
+});
+
+test('the context option must be a function', () => {
+  assert.throws(() => new ChatController({ client: makeClient(), context: { route: '/' } }), TypeError);
+});
+
 test('send passes an effort only when the resolved choice lists it', async () => {
   const client = makeClient();
   client.statusResult = {

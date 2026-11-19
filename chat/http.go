@@ -54,6 +54,9 @@ const (
 	// CodeUnsupportedAttachment reports an upload the configured provider
 	// cannot send, so the turn would silently lose a file.
 	CodeUnsupportedAttachment = "unsupported_attachment"
+	// CodeTurnRefused reports a turn the host's Setup hook refused, with the
+	// host's user-facing reason. Nothing was stored.
+	CodeTurnRefused = "turn_refused"
 )
 
 // Fixed, user-safe error messages. Server-internal error text is never echoed.
@@ -88,6 +91,7 @@ const (
 
 const (
 	defaultMaxBodyBytes      = 64 << 10
+	defaultMaxContextBytes   = 16 << 10
 	defaultMaxMessageChars   = 16000
 	defaultHeartbeatInterval = 15 * time.Second
 
@@ -153,6 +157,15 @@ type HandlerConfig struct {
 	// HeartbeatInterval is how often an idle event stream emits a comment
 	// line. Zero means 15s.
 	HeartbeatInterval time.Duration
+	// TurnContext accepts a "context" object on a turn submission: the page
+	// the user is on, their selection and the like, which the runner's Setup
+	// hook (or, by default, the system prompt) receives. False means a turn
+	// with a context is rejected, so a client that never sends one sees the
+	// previous surface.
+	TurnContext bool
+	// MaxContextBytes bounds a turn's context, as sent. Zero means 16 KiB. It
+	// counts toward MaxBodyBytes too.
+	MaxContextBytes int
 	// TargetCheck validates a client-supplied target reference for this
 	// caller. Nil means targets are not supported at all: creating a targeted
 	// conversation or filtering by target is rejected. It is re-run on every
@@ -224,6 +237,9 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 	}
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = defaultHeartbeatInterval
+	}
+	if cfg.MaxContextBytes <= 0 {
+		cfg.MaxContextBytes = defaultMaxContextBytes
 	}
 	if cfg.DecisionTimeout <= 0 {
 		cfg.DecisionTimeout = defaultDecisionTimeout
@@ -781,6 +797,8 @@ func (h *handler) activeTurn(ctx context.Context, owner OwnerKey, conversationID
 type featuresView struct {
 	Proposals bool `json:"proposals"`
 	Uploads   bool `json:"uploads"`
+	// Context is only present when turns accept a page context.
+	Context bool `json:"context,omitempty"`
 }
 
 type limitsView struct {
@@ -792,6 +810,8 @@ type limitsView struct {
 	MaxUploadBytes        int64     `json:"maxUploadBytes,omitempty"`
 	MaxAttachmentsPerTurn int       `json:"maxAttachmentsPerTurn,omitempty"`
 	AttachmentTypes       *[]string `json:"attachmentTypes,omitempty"`
+	// MaxContextBytes is only present when turns accept a page context.
+	MaxContextBytes int `json:"maxContextBytes,omitempty"`
 }
 
 type statusView struct {
@@ -844,11 +864,12 @@ type renameConversationRequest struct {
 }
 
 type submitTurnRequest struct {
-	Text        *string  `json:"text"`
-	Provider    *string  `json:"provider"`
-	Model       *string  `json:"model"`
-	Effort      *string  `json:"effort"`
-	Attachments []string `json:"attachments"`
+	Text        *string         `json:"text"`
+	Provider    *string         `json:"provider"`
+	Model       *string         `json:"model"`
+	Effort      *string         `json:"effort"`
+	Attachments []string        `json:"attachments"`
+	Context     json.RawMessage `json:"context"`
 }
 
 // uploadView is the response body of every upload endpoint. The bytes are
@@ -1138,6 +1159,9 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	limits := limitsView{MaxMessageChars: h.cfg.MaxMessageChars}
+	if h.cfg.TurnContext {
+		limits.MaxContextBytes = h.cfg.MaxContextBytes
+	}
 	if h.cfg.Uploads != nil {
 		limits.MaxUploadBytes = h.cfg.MaxUploadBytes
 		limits.MaxAttachmentsPerTurn = h.cfg.MaxAttachmentsPerTurn
@@ -1155,6 +1179,7 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 		Features: featuresView{
 			Proposals: h.cfg.Proposals != nil,
 			Uploads:   h.cfg.Uploads != nil,
+			Context:   h.cfg.TurnContext,
 		},
 		Limits: limits,
 	})
@@ -1399,6 +1424,10 @@ func (h *handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
 		return
 	}
+	turnContext, ok := h.turnContext(w, req.Context)
+	if !ok {
+		return
+	}
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	// Return a previously created turn before resolving a provider or
 	// validating attachments. A retry after a lost response must not fail
@@ -1481,8 +1510,16 @@ func (h *handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 		Target:         target,
 		Tools:          caller.Tools,
 		Deadline:       caller.Expires,
+		Context:        turnContext,
+		// gateConversation checked the caller may still use the target.
+		ConversationTarget: conv.Target,
 	})
 	if err != nil {
+		var refused *TurnRefusedError
+		if errors.As(err, &refused) {
+			h.writeError(w, http.StatusBadRequest, CodeTurnRefused, refused.Message)
+			return
+		}
 		if errors.Is(err, ErrModelUnknown) || errors.Is(err, ErrModelAmbiguous) || errors.Is(err, ErrNoModelConfigured) || errors.Is(err, ErrEffortUnsupported) {
 			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
 			return
@@ -1491,6 +1528,25 @@ func (h *handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writeJSON(w, http.StatusAccepted, submitTurnView{Turn: turn, Created: created})
+}
+
+// turnContext checks a submitted page context: off unless the host turned it
+// on, a JSON object, and within MaxContextBytes. An absent or null context is
+// nil.
+func (h *handler) turnContext(w http.ResponseWriter, raw json.RawMessage) (json.RawMessage, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, true
+	}
+	if !h.cfg.TurnContext || trimmed[0] != '{' {
+		h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
+		return nil, false
+	}
+	if len(trimmed) > h.cfg.MaxContextBytes {
+		h.writeError(w, http.StatusRequestEntityTooLarge, CodePayloadTooLarge, msgPayloadTooLarge)
+		return nil, false
+	}
+	return append(json.RawMessage(nil), trimmed...), true
 }
 
 func (h *handler) getTurn(w http.ResponseWriter, r *http.Request) {

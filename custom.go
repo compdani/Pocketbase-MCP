@@ -397,6 +397,10 @@ func (s *Server) callCustom(ctx context.Context, p Principal, baseURL, channel s
 		outcome = "invalid"
 		return nil, "", &protocol.Error{Code: protocol.CodeInvalidParams, Message: "Invalid params", Data: e.Error()}
 	}
+	if msg := runToolValidate(ctx, &t, p, args); msg != "" {
+		outcome = "invalid"
+		return nil, "", &protocol.Error{Code: protocol.CodeInvalidParams, Message: "Invalid params", Data: msg}
+	}
 	timeout := t.Timeout
 	if timeout == 0 {
 		timeout = s.cfg.MaxToolTimeout
@@ -469,6 +473,24 @@ func (s *Server) callCustom(ctx context.Context, p Principal, baseURL, channel s
 
 // requestIDString renders an audit request id. A missing id (chat calls carry
 // no JSON-RPC id) is the empty string rather than "<nil>".
+// runToolValidate runs a tool's Validate hook and returns the refusal to show
+// the model, or "" when the arguments pass. A host's ToolError or
+// AccessError message is shown as-is; any other error stays generic, so hook
+// internals never reach the model.
+func runToolValidate(ctx context.Context, t *ToolSpec, p Principal, args map[string]any) string {
+	if t == nil || t.Validate == nil {
+		return ""
+	}
+	err := t.Validate(ctx, p, args)
+	if err == nil {
+		return ""
+	}
+	if msg, ok := UserMessage(err); ok && strings.TrimSpace(msg) != "" {
+		return msg
+	}
+	return "the arguments were refused"
+}
+
 func requestIDString(id any) string {
 	if id == nil {
 		return ""

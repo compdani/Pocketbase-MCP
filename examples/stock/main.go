@@ -13,10 +13,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/pocketbase/pocketbase"
-	"github.com/pocketbase/pocketbase/core"
-	"github.com/pocketbase/pocketbase/tools/filesystem"
-	"github.com/pocketbase/pocketbase/tools/types"
+	"ganigeorgiev.com/pocketbase/pocketbase"
+	"ganigeorgiev.com/pocketbase/pocketbase/core"
+	"ganigeorgiev.com/pocketbase/pocketbase/tools/filesystem"
+	"ganigeorgiev.com/pocketbase/pocketbase/tools/types"
 
 	pbmcp "github.com/compdani/pocketbase-mcp"
 	pb "github.com/compdani/pocketbase-mcp/adapters/pocketbase"
