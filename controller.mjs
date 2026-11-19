@@ -381,12 +381,17 @@ export class ChatController extends EventTarget {
     idleTimeoutMs = IDLE_TIMEOUT_MS,
     editor = null,
     sync = {},
+    context = null,
   } = {}) {
     super();
     if (!client) throw new TypeError('ChatController requires a client');
     if (editor !== null && editor !== undefined && typeof editor !== 'object') {
       throw new TypeError('ChatController editor must be an object');
     }
+    if (context !== null && context !== undefined && typeof context !== 'function') {
+      throw new TypeError('ChatController context must be a function');
+    }
+    this._context = context ?? null;
 
     this._client = client;
     this._reconnect = {
@@ -1569,7 +1574,7 @@ export class ChatController extends EventTarget {
     return this._track(this._send(text, options));
   }
 
-  async _send(text, { model, provider, effort, attachments } = {}) {
+  async _send(text, { model, provider, effort, attachments, context } = {}) {
     const conversationId = this._state.activeConversationId;
     if (!conversationId) {
       throw new Error('ChatController.send() requires an open conversation');
@@ -1596,6 +1601,15 @@ export class ChatController extends EventTarget {
       if (attachmentIds === null || !this._current(epoch)) return null;
     }
 
+    // The page context is read once per send, so every retry of this
+    // submission carries the same one. Only a server that accepts contexts
+    // gets one.
+    let turnContext;
+    if (this._state.features?.context) {
+      turnContext = context !== undefined ? context : this._context ? await this._context() : undefined;
+      if (!this._current(epoch)) return null;
+    }
+
     const idempotencyKey = newIdempotencyKey();
     this._set({ running: true, error: null });
 
@@ -1608,6 +1622,7 @@ export class ChatController extends EventTarget {
           model,
           effort,
           attachments: attachmentIds.length > 0 ? attachmentIds : undefined,
+          context: turnContext ?? undefined,
           idempotencyKey,
         });
         break;
