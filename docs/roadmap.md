@@ -1,12 +1,13 @@
 # Roadmap
 
-Status on 2026-11-18. Done, and covered by tests: the MCP server (milestones
-1–5), chat v1.1 (read-only) and chat v1.2 (proposals, editor tools, uploads).
-Chat v1.1 and v1.2 are not committed yet. Chat v1.3 (provider catalog, OpenAI
+Status on 2026-11-19. Done, committed and covered by tests: the MCP server
+(milestones 1–5), chat v1.1 (read-only) and chat v1.2 (proposals, editor
+tools, uploads). The fork's OAuth branch is merged (pb-postgress PR #4) and
+pinned at `v0.41.6`. Chat v1.3 (provider catalog, OpenAI
 Responses, ChatGPT/Codex plan sign-in) is implemented and has had one review
 pass. It still needs staging and a real Codex sign-in.
 
-Suggested order: commit and browser check → staging tests → hardening →
+Suggested order: browser check → staging tests → hardening →
 migrations.
 
 ## Next
@@ -16,7 +17,6 @@ migrations.
 - **Decide whether a changed provider host requires the key again.** Today a
   saved key follows the entry's `baseURL`. See the review note in
   [chat-providers-plan.md](chat-providers-plan.md).
-- **Commit chat v1.1 + v1.2 + v1.3.**
 - **Try the chat examples in a real browser.** So far they were checked with
   Node scripts, `curl`, Vite builds and serving their index page. Sign in and
   chat once by hand. Nuxt is described in the Vue README but untested.
@@ -31,8 +31,7 @@ migrations.
   two apps in one process, clean shutdown, and no tool-list leaks between
   users under load.
 - **Release material:** a support matrix (PocketBase versions, fork commit,
-  Go version, databases) and a written customjs migration guide. Re-pin the
-  fork once its branch is merged.
+  Go version, databases) and a written customjs migration guide.
 - **customjs switch-over:** follow
   [operations.md](operations.md#migrating-from-customjs), testing against
   ChatGPT on staging first.

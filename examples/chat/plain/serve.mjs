@@ -4,7 +4,8 @@
 //
 //   /            examples/chat/plain (this folder)
 //   /client/     frontend/client
-//   /agent-panel/ a local agent-panel checkout (AGENT_PANEL_DIR)
+//   /agent-panel/ agent-panel: redirected to the pinned release on jsDelivr,
+//                 or served from a local checkout when AGENT_PANEL_DIR is set
 //   /api/        reverse proxy to PocketBase (PB_URL), streamed
 //
 // The proxy pipes the upstream body straight through and flushes headers, so
@@ -23,8 +24,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-/** Where the local agent-panel checkout lives unless AGENT_PANEL_DIR says otherwise. */
-export const DEFAULT_AGENT_PANEL_DIR = '/Volumes/mini512/Components/agent-panel';
+/**
+ * The agent-panel release this example is built against
+ * (github.com/compdani/agent-panel). Without AGENT_PANEL_DIR, `/agent-panel/*`
+ * redirects here.
+ */
+export const AGENT_PANEL_VERSION = 'v0.3.1';
+export const AGENT_PANEL_CDN = `https://cdn.jsdelivr.net/gh/compdani/agent-panel@${AGENT_PANEL_VERSION}`;
 export const DEFAULT_PB_URL = 'http://127.0.0.1:8090';
 export const DEFAULT_PORT = 5174;
 export const BIND_HOST = '127.0.0.1';
@@ -74,9 +80,12 @@ export function resolveOptions(overrides = {}) {
   return {
     appDir,
     clientDir: path.resolve(overrides.clientDir ?? path.join(appDir, '..', '..', '..', 'frontend', 'client')),
-    agentPanelDir: path.resolve(
-      overrides.agentPanelDir ?? process.env.AGENT_PANEL_DIR ?? DEFAULT_AGENT_PANEL_DIR,
-    ),
+    // null: use the pinned release on the CDN. An explicit `agentPanelDir:
+    // null` override ignores AGENT_PANEL_DIR.
+    agentPanelDir: (() => {
+      const dir = 'agentPanelDir' in overrides ? overrides.agentPanelDir : process.env.AGENT_PANEL_DIR;
+      return dir ? path.resolve(dir) : null;
+    })(),
     pbUrl: overrides.pbUrl ?? process.env.PB_URL ?? DEFAULT_PB_URL,
   };
 }
@@ -137,6 +146,13 @@ async function handleStatic(req, res, options) {
   const parsed = parsePath(req.url);
   if (parsed.error) {
     sendText(res, 403, parsed.error);
+    return;
+  }
+
+  if (parsed.segments[0] === 'agent-panel' && !options.agentPanelDir) {
+    const rest = parsed.segments.slice(1).map(encodeURIComponent).join('/');
+    res.writeHead(302, { Location: `${AGENT_PANEL_CDN}/${rest}`, 'Cache-Control': 'no-store' });
+    res.end();
     return;
   }
 
@@ -273,7 +289,7 @@ if (isMain) {
   console.log(`chat demo: ${running.url}`);
   console.log(`  app         ${running.options.appDir}`);
   console.log(`  client      ${running.options.clientDir}`);
-  console.log(`  agent-panel ${running.options.agentPanelDir}`);
+  console.log(`  agent-panel ${running.options.agentPanelDir ?? `${AGENT_PANEL_CDN} (set AGENT_PANEL_DIR for a local checkout)`}`);
   console.log(`  proxy       /api/ -> ${running.options.pbUrl}`);
   console.log('Local development only. Ctrl+C stops it.');
 }

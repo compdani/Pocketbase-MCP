@@ -5,19 +5,23 @@ Deploying and running the module. How it works is in
 
 ## Pinned versions
 
-Updated 2026-11-17.
+Updated 2026-11-19.
 
 | Item | Pin |
 |---|---|
 | Root module | `github.com/compdani/pocketbase-mcp`, standard library only, `go 1.26` |
 | Stock PocketBase | `github.com/pocketbase/pocketbase v0.40.1` (what customjs builds against) |
-| Fork | pb-postgress, branch `oauth-mcp-clients` at `8cff7a96` (based on `master` `5c872907`). Not merged into the fork's `master` yet; re-pin to the merge commit when it lands. |
+| Fork | `github.com/compdani/pb-postgress` `master` at `c047535c` (merge of PR #4, `oauth-mcp-clients`), tagged and pinned as `v0.41.6` |
 | Go toolchain | `go1.26.5`. Modules that depend on PocketBase (adapters, `auth/stockoauth`, examples) declare `go 1.27` and switch to `go1.27.0` automatically. |
 | Databases tested | SQLite (stock), PostgreSQL 14 (fork). **MySQL is untested.** |
 
 Each adapter and example picks its PocketBase with its own `go.mod`
 `replace` directive. Never use a `go.work` that includes both adapters or both
 examples.
+
+To try unmerged fork changes, point the fork modules at a local checkout for
+the time being (`go mod edit -replace github.com/pocketbase/pocketbase=../path/to/pb-postgress`)
+and don't commit that change.
 
 ## Deployment checklist (fork)
 
