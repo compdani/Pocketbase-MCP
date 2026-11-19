@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pocketbase/pocketbase/core"
-	"github.com/pocketbase/pocketbase/tools/hook"
-	"github.com/pocketbase/pocketbase/tools/router"
+	"ganigeorgiev.com/pocketbase/pocketbase/core"
+	"ganigeorgiev.com/pocketbase/pocketbase/tools/hook"
+	"ganigeorgiev.com/pocketbase/pocketbase/tools/router"
 
 	pbmcp "github.com/compdani/pocketbase-mcp"
 	"github.com/compdani/pocketbase-mcp/chat"
@@ -57,7 +57,7 @@ type ChatConfig struct {
 	// for its own collections when supplied.
 	ProviderStore catalog.Store
 	// RunnerConfig supplies optional runner limits (steps, timeout, worker
-	// bounds, history). Its Store, Provider, Model and System fields are
+	// bounds, history, output tokens) and the per-turn Setup hook. Its Store, Provider, Model and System fields are
 	// overridden by this config. A custom Options.Runner that resolves a
 	// catalog must also receive Options.Router; the adapter cannot infer it.
 	RunnerConfig chat.RunnerConfig

@@ -21,11 +21,11 @@ used from a chat panel inside your own app.
 | Path | What it is |
 |---|---|
 | `*.go`, `protocol/`, `schema/` | Root module `github.com/compdani/pocketbase-mcp`: MCP server, manifest, policies, custom tools, schema validator. No PocketBase dependency. |
-| `adapters/pocketbase/` | Adapter for stock PocketBase (v0.40.1). |
+| `adapters/pocketbase/` | Adapter for stock PocketBase (v0.41.1, `ganigeorgiev.com/pocketbase/pocketbase`). |
 | `adapters/pbpostgress/` | Adapter for the pb-postgress fork. |
 | `auth/stockoauth/` | OAuth sign-in for stock PocketBase (the fork has its own). |
 | `chat/` | Optional chat service: turns, streaming, proposals, uploads, provider adapters. |
-| `frontend/client/` | Dependency-free browser client for the chat API, with an `<agent-panel>` binding (needs [agent-panel](https://github.com/compdani/agent-panel) v0.4.0+). |
+| `frontend/client/` | Dependency-free browser client for the chat API, with an `<agent-panel>` binding (needs [agent-panel](https://github.com/compdani/agent-panel) v0.4.0+; the examples use v0.4.1). |
 | `examples/stock/`, `examples/fork/` | Runnable example apps, one per host. |
 | `examples/chat/` | Plain JS, Vue and Svelte chat front ends. |
 | `verification/` | Milestone test reports. |

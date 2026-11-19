@@ -54,10 +54,17 @@
       </aside>
       <agent-page id="page"></agent-page>
       <!-- A second view of the same account, as an app's side panel would be:
-           its own controller, the conversation switcher, kept in step with the
-           page through the controllers' list sync. -->
-      <agent-panel id="side" class="side" heading="Assistant" conversations-menu closable hidden
-                   placeholder="Ask anything…" empty-title="How can I help?"></agent-panel>
+           its own controller, kept in step with the page through the
+           controllers' list sync. conversations-menu makes the header title a
+           conversation switcher (heading shows only while the list is empty);
+           floating draws the panel as a card over the page. -->
+      <agent-panel id="side" class="side" heading="Assistant" conversations-menu floating closable hidden
+                   placeholder="Ask anything…" empty-title="How can I help?">
+        <span slot="header-start" class="side-mark" aria-hidden="true">✦</span>
+        <button slot="switcher-end" type="button" id="side-open-page" class="side-open-page">
+          Open in the full page
+        </button>
+      </agent-panel>
     </div>
   </main>
 

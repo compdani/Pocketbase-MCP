@@ -175,6 +175,10 @@ type fixtureOptions struct {
 	maxUploadBytes    int64
 	maxAttachments    int
 	maxUploadsPerConv int
+	// turnContext accepts a page context on turns; setup is the runner hook.
+	turnContext bool
+	maxContext  int
+	setup       func(context.Context, TurnInput) (TurnSetup, error)
 }
 
 // apiFixture wires a real handler behind an httptest server, with the same
@@ -203,7 +207,7 @@ func newFixture(t *testing.T, opts fixtureOptions) *apiFixture {
 			prov = scriptedPr
 		}
 	}
-	runnerCfg := RunnerConfig{Store: store, Provider: prov, Model: "model-a", Router: opts.router}
+	runnerCfg := RunnerConfig{Store: store, Provider: prov, Model: "model-a", Router: opts.router, Setup: opts.setup}
 	var proposals ProposalStore
 	if opts.proposals {
 		runnerCfg.Proposals = store
@@ -238,6 +242,8 @@ func newFixture(t *testing.T, opts fixtureOptions) *apiFixture {
 		MaxUploadBytes:            opts.maxUploadBytes,
 		MaxAttachmentsPerTurn:     opts.maxAttachments,
 		MaxUploadsPerConversation: opts.maxUploadsPerConv,
+		TurnContext:               opts.turnContext,
+		MaxContextBytes:           opts.maxContext,
 	})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)

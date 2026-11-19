@@ -52,6 +52,12 @@ export interface ChatControllerOptions {
    * is always re-read after a finished turn.
    */
   sync?: ChatSyncOptions | false;
+  /**
+   * Reads the page context for each send (route, selection, editor revision).
+   * Called once per send, only when the server reports `features.context`;
+   * a `context` passed to send() wins.
+   */
+  context?: (() => Record<string, unknown> | null | undefined | Promise<Record<string, unknown> | null | undefined>) | null;
 }
 
 /** The host editor's current state, used to name the revision of a stale report. */
@@ -275,6 +281,8 @@ export declare class ChatController extends EventTarget {
        */
       effort?: string;
       attachments?: Array<string | Blob | File>;
+      /** Page context for this send; overrides the controller's `context` option. */
+      context?: Record<string, unknown> | null;
     },
   ): Promise<ChatSubmitResult | null>;
 

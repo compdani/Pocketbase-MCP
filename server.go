@@ -574,6 +574,9 @@ func (d chatWriteDescriptor) chatWriteSummary(args map[string]any, collection st
 		if title == "" {
 			title = d.custom.Name
 		}
+		if detail := customSummary(d.custom, args); detail != "" {
+			return title + ": " + detail + " (changes data)"
+		}
 		return title + " (changes data)"
 	}
 	switch d.action {
@@ -607,15 +610,34 @@ func (d chatWriteDescriptor) chatWriteTarget(args map[string]any, collection str
 // document it edits and when it takes effect. Like chatWriteSummary it is built
 // server-side, never from model text, because the user's review decision is
 // about this sentence.
-func (d chatWriteDescriptor) chatEditSummary(editorID string) string {
+func (d chatWriteDescriptor) chatEditSummary(editorID string, args map[string]any) string {
 	title := d.name
 	if d.custom != nil {
 		title = d.custom.Title
 		if title == "" {
 			title = d.custom.Name
 		}
+		if detail := customSummary(d.custom, args); detail != "" {
+			return title + ": " + detail + " in " + editorID + " (applies in the editor after approval)"
+		}
 	}
 	return title + ": edit " + editorID + " (applies in the editor after approval)"
+}
+
+// maxCustomSummaryRunes bounds a host-written proposal summary.
+const maxCustomSummaryRunes = 300
+
+// customSummary returns a tool's own one-line description of a call, trimmed
+// to one bounded line, or "" when the tool has none.
+func customSummary(t *ToolSpec, args map[string]any) string {
+	if t == nil || t.Summarize == nil {
+		return ""
+	}
+	s := strings.Join(strings.Fields(t.Summarize(args)), " ")
+	if r := []rune(s); len(r) > maxCustomSummaryRunes {
+		s = string(r[:maxCustomSummaryRunes-1]) + "…"
+	}
+	return s
 }
 
 func baseSearchPropsGeneric() map[string]any {

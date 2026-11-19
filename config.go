@@ -127,6 +127,20 @@ type ToolSpec struct {
 	// on an editor tool, whose every change needs review.
 	Approval string
 	Handler  func(ctx context.Context, call CallContext, args map[string]any) (any, error)
+	// Validate, when set, checks a call's arguments after InputSchema accepts
+	// them: before Handler runs on MCP or chat, and before a chat write or
+	// editor call becomes a proposal (and again when a proposal is edited or
+	// approved). It is for checks JSON Schema cannot express, such as the
+	// operations of a host-defined editor patch. Return Invalid(msg) or a
+	// ToolError to give the model a specific reason; any other error is
+	// reported as a generic refusal. It must not have side effects.
+	Validate func(ctx context.Context, p Principal, args map[string]any) error
+	// Summarize, when set, describes a chat proposal for this tool in one line
+	// from its validated arguments, for the reviewer (for example "replace
+	// block hero-2 and add 1 block"). The server writes it, never the model.
+	// The tool's title and whether it changes data or the editor are still
+	// shown around it. Empty output falls back to the default summary.
+	Summarize func(args map[string]any) string
 }
 
 // Config configures a Server. Zero values get documented defaults.

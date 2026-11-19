@@ -10,6 +10,15 @@ line for every failed chat turn (with the provider's sanitized reason), plain
 messages for failed-turn codes in the agent-panel binding, and per-turn
 reasoning effort.
 
+Unreleased (branch `pocketbase-v0.41`, for the app migrations): the stock
+adapter, stockoauth and stock example build against PocketBase v0.41.1 on
+`ganigeorgiev.com/pocketbase/pocketbase`; `ResolveCaller` in both adapters
+lets a custom tool run the host's own handlers as the caller; turns can carry
+a page `context` (`TurnContext`), and `RunnerConfig.Setup` picks each turn's
+system prompt and limits from it; `RunnerConfig.MaxOutputTokens`; and
+`ToolSpec.Validate` / `ToolSpec.Summarize` for structured editor patches and
+other checks a schema can't express.
+
 Suggested order: browser check → staging tests → hardening →
 migrations.
 
@@ -52,6 +61,19 @@ migrations.
   caused the old flaky `TestNativeDiscoveryRegistrationPKCE`.
 
 ## App migrations
+
+What List Pocket still needs from this module, after the work above:
+
+- **Two-factor sign-in for remote MCP.** stockoauth signs in through
+  `auth-with-password`, which List Pocket refuses for users with its own TOTP
+  and for OIDC-only users. Needs a host-defined second step, or hand-off to
+  an existing app session.
+- **A stdio entry point** (a small CLI that talks to `/mcp`), so existing
+  stdio client setups such as `listpocket-mcp` keep working.
+- **History import** for conversations kept in the browser today.
+- **Shared provider settings:** a `catalog.Store` backed by the app's own AI
+  settings, so it doesn't keep two keys and two ChatGPT sign-ins.
+  `ChatConfig.ProviderStore` is the hook; no example exists yet.
 
 Move one screen each in List Pocket, Event Pocket and Static Dealmakers onto
 the chat module, as separate work. Keep each app's permission policy,
