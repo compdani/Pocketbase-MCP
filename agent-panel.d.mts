@@ -116,8 +116,9 @@ export interface AgentModelChoice {
 }
 
 /**
- * The properties the binding writes. `<agent-page>` adds `conversations` and
- * `active`; `heading` is an attribute, set through `setAttribute`.
+ * The properties the binding writes. `<agent-page>` and `<agent-panel>` 0.4+
+ * add `conversations`, `active` and `hasMore`; the page also gets `heading`,
+ * an attribute set through `setAttribute`.
  */
 export interface AgentPanelLike extends EventTarget {
   entries: AgentEntry[];
@@ -126,6 +127,7 @@ export interface AgentPanelLike extends EventTarget {
   models: string | Array<string | AgentModelChoice>;
   conversations?: AgentConversation[];
   active?: string;
+  hasMore?: boolean;
   draft?: string;
   setAttribute?(name: string, value: string): void;
   getAttribute?(name: string): string | null;
@@ -243,8 +245,11 @@ export declare function conversationsFromState(
   state: Pick<ChatControllerState, 'conversations'> | null | undefined,
 ): AgentConversation[];
 
-/** Whether this element is `<agent-page>` (it has the sidebar state). */
+/** Whether this element is `<agent-page>` (renamable title and sidebar). */
 export declare function isPageElement(element: object): boolean;
+
+/** Whether this element shows a conversation list (`<agent-page>`, or `<agent-panel>` 0.4+). */
+export declare function hasConversationList(element: object): boolean;
 
 /** Map a controller snapshot to agent-panel entries. Pure. */
 export declare function entriesFromState(

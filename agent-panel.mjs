@@ -188,12 +188,30 @@ export function conversationsFromState(state) {
   return out;
 }
 
-/** Whether this element is the full page (it has the sidebar state). */
+/**
+ * Whether this element is the full page (renamable title, sidebar). Since
+ * agent-panel 0.4 the compact panel has `conversations` too, so it is told
+ * apart by its switcher methods.
+ */
 export function isPageElement(element) {
   if (!element || typeof element !== 'object') return false;
   const tag = typeof element.tagName === 'string' ? element.tagName.toUpperCase() : '';
   if (tag === 'AGENT-PAGE') return true;
+  if (tag === 'AGENT-PANEL') return false;
+  if (typeof element.startRename === 'function') return true;
+  if (typeof element.openConversations === 'function') return false;
   return element.conversations !== undefined || element.active !== undefined;
+}
+
+/**
+ * Whether this element shows a conversation list: the page's sidebar, or the
+ * switcher of `<agent-panel>` 0.4+ (shown with its `conversations-menu`
+ * attribute).
+ */
+export function hasConversationList(element) {
+  if (!element || typeof element !== 'object') return false;
+  return isPageElement(element) || element.conversations !== undefined
+    || typeof element.openConversations === 'function';
 }
 
 function textOfParts(parts) {
@@ -870,6 +888,7 @@ export function bindAgentPanel(element, controller, options = {}) {
     throw new TypeError('bindAgentPanel() requires the controller');
   }
   const page = isPageElement(element);
+  const lists = hasConversationList(element);
   const autoCreate = options.autoCreate !== false;
   if (options.registerEntries !== false) registerProposalEntry(element);
 
@@ -922,14 +941,16 @@ export function bindAgentPanel(element, controller, options = {}) {
     writeEffortOption(snapshot);
     writeAttachmentLimits(element, snapshot);
 
-    if (page) {
+    if (lists) {
       const conversations = conversationsFromState(snapshot);
       writeProperty(element, 'conversations', conversations);
       const active = typeof snapshot.activeConversationId === 'string'
         ? snapshot.activeConversationId
         : '';
       writeProperty(element, 'active', active);
-      writeHeading(element, titleOfConversation(snapshot, active));
+      writeProperty(element, 'hasMore', Boolean(snapshot.nextCursor));
+      // The panel's heading is the host's (e.g. the assistant's name).
+      if (page) writeHeading(element, titleOfConversation(snapshot, active));
     }
   }
 
@@ -1141,7 +1162,7 @@ export function bindAgentPanel(element, controller, options = {}) {
   listen(element, 'agent-action', onAction);
   listen(element, 'agent-reference-open', onReferenceOpen);
 
-  if (page) {
+  if (lists) {
     listen(element, 'agent-select-conversation', (event) => {
       // The binding owns selection; never let a row navigate away.
       if (typeof event.preventDefault === 'function') event.preventDefault();
@@ -1150,13 +1171,20 @@ export function bindAgentPanel(element, controller, options = {}) {
       void controller.open(String(id));
     });
     listen(element, 'agent-new-conversation', () => {
-      void controller.newConversation();
+      // A draft: the first message creates the conversation, so "New chat"
+      // pressed twice leaves no empty conversations behind. Without
+      // autoCreate there is no first-message creation, so create it now.
+      if (autoCreate && typeof controller.startDraft === 'function') controller.startDraft();
+      else void controller.newConversation();
     });
     listen(element, 'agent-delete-conversation', (event) => {
       const id = event.detail?.id;
       if (id === undefined || id === null) return;
       void controller.remove(String(id));
     });
+    listen(element, 'agent-load-more', onLoadMore);
+  }
+  if (page) {
     listen(element, 'agent-rename', (event) => {
       const id = state().activeConversationId;
       const title = typeof event.detail?.title === 'string' ? event.detail.title.trim() : '';
@@ -1166,9 +1194,6 @@ export function bindAgentPanel(element, controller, options = {}) {
       }
       void controller.rename(String(id), title);
     });
-    // Not a built-in page event today: a host that draws a "Load more" button
-    // in the `sidebar-end` slot can dispatch it.
-    listen(element, 'agent-load-more', onLoadMore);
   }
 
   paint();

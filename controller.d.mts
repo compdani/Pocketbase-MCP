@@ -47,9 +47,32 @@ export interface ChatControllerOptions {
    * decide() calls validatePatch, then applyPatch, then reports the outcome.
    */
   editor?: ChatEditorAdapter | null;
+  /**
+   * Conversation list sync. On by default; `false` turns it all off. The list
+   * is always re-read after a finished turn.
+   */
+  sync?: ChatSyncOptions | false;
 }
 
 /** The host editor's current state, used to name the revision of a stale report. */
+export interface ChatSyncOptions {
+  /** Tell and hear other controllers for the same account (other elements, other tabs) over a BroadcastChannel. Default true. */
+  channel?: boolean;
+  /** Refresh when the page becomes visible or the window regains focus. Default true. */
+  focus?: boolean;
+  /** Refresh this often while the page is visible; 0 turns it off. Default 60000. */
+  intervalMs?: number;
+}
+
+export interface ChatConversationMerge {
+  conversations: ChatConversation[];
+  /** `null`: keep the current cursor (rows from loadMore were kept). */
+  nextCursor: string | null;
+  /** Whether the page's range included the row with this id. */
+  covers(id: string): boolean;
+  complete: boolean;
+}
+
 export interface ChatEditorSnapshot {
   editorId?: string;
   target?: string;
@@ -189,6 +212,12 @@ export declare function mergeProposals(
 export declare function inferAttachmentMime(name?: string): string;
 
 /** Percent-encoded account identity, or null when no key is set. */
+/** Merge a fresh first conversation page over the loaded list. */
+export declare function mergeConversationPage(
+  loaded: ChatConversation[] | null | undefined,
+  page: { items?: ChatConversation[]; nextCursor?: string } | null | undefined,
+): ChatConversationMerge;
+
 export declare function accountKeyOf(storageKey?: ChatAccountKey | null): string | null;
 
 /**
@@ -211,6 +240,10 @@ export declare class ChatController extends EventTarget {
 
   /** Append the next conversation page. */
   loadMore(): Promise<ChatControllerState>;
+  /** Re-read the first page and merge it in; clears the view if the open conversation was deleted elsewhere. */
+  refreshConversations(): Promise<ChatControllerState>;
+  /** Leave the open conversation; the next send() creates one. */
+  startDraft(): ChatControllerState;
 
   /** Open a conversation, attaching to its active turn when one exists. */
   open(conversationId: string): Promise<ChatControllerState>;

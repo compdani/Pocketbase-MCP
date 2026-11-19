@@ -55,6 +55,35 @@ await chat.send('Hello', { model: chat.state.choice || 'gpt-4.1' });
 }
 ```
 
+## List sync
+
+The conversation list follows the server without the host doing anything:
+
+- after every turn ends (the server has moved the conversation's `updatedAt`
+  and may have titled it);
+- when the page becomes visible or the window regains focus;
+- every `intervalMs` (60 s) while the page is visible;
+- whenever another controller for the same account (another element on the
+  page, such as a side panel next to a full chat page, or another tab) creates,
+  renames, deletes or sends. They talk over a `BroadcastChannel` named after
+  the account key, so another account never hears it.
+
+`refreshConversations()` does the same on demand. It merges the first page
+over what is loaded: new and renamed rows appear, rows the page covers but no
+longer returns are dropped, and rows loaded with `loadMore()` stay. If the open
+conversation is missing, it is cleared only after the server answers 404 for
+it. A refresh that raced a local write reads the list again rather than undo
+the write.
+
+```js
+new ChatController({ client, storageKey, sync: { intervalMs: 30000 } });
+new ChatController({ client, storageKey, sync: false }); // only after-turn refreshes
+```
+
+`startDraft()` leaves the open conversation without creating one; the next
+`send()` (or the binding's first message) creates it. The binding's **New
+chat** uses it, so pressing it twice leaves no empty conversations behind.
+
 Call `chat.setAccount({ appUrl, mount, authCollectionId, userId })` whenever the
 signed-in user can change. A different key aborts in-flight requests, clears all
 state and reloads, so one user's data is never shown to another.
@@ -223,11 +252,20 @@ render, instead of making every consumer walk `messages[].parts` itself.
 
 ### `ChatController`
 
-`init`, `loadMore`, `open`, `newConversation`, `rename`, `remove`, `send`,
+`init`, `loadMore`, `refreshConversations`, `open`, `newConversation`,
+`startDraft`, `rename`, `remove`, `send`,
 `attach`, `clearAttachments`, `decide`, `reportOutcome`, `stop`, `setAccount`,
 `dispose`, plus `whenSettled()` for tests and shutdown.
 
 ### `bindAgentPanel` / entry mapping
+
+> **Requires agent-panel v0.4.0 or later.** Install it with
+> `npm install github:compdani/agent-panel#v0.4.0`. 0.4.0 adds the panel's
+> conversation switcher (`conversations-menu`, with delete), the built-in
+> "Load more" (`has-more` / `agent-load-more`), and the panel's
+> `conversations` / `active` properties that the list sync writes. With 0.3.x,
+> `<agent-panel>` shows no conversation list and the page's list has no
+> "Load more".
 
 Binds one controller to one `<agent-panel>` or `<agent-page>` from
 [`agent-panel`](https://github.com/compdani/agent-panel). The element is passed
@@ -248,6 +286,22 @@ binding.unbind();
 chat.dispose();
 ```
 
+A side panel gets the same list with agent-panel's switcher (a dropdown
+of conversations, each with Delete, plus New chat):
+
+```html
+<agent-panel heading="Assistant" conversations-menu closable></agent-panel>
+```
+
+```js
+import 'agent-panel';
+const panel = document.querySelector('agent-panel');
+bindAgentPanel(panel, new ChatController({ client, storageKey }));
+```
+
+Give the panel its own controller even when a page is open too: the two keep
+their lists in step (see [List sync](#list-sync)).
+
 On every controller `change` it writes:
 
 | Property | Value |
@@ -257,7 +311,8 @@ On every controller `change` it writes:
 | `error` | A plain-language line mapped from `state.error` (and a failed turn's error). Raw server messages are never shown. |
 | `models` | `state.models`, for the model menu. |
 | `no-attachments`, `accept`, `max-file-size`, `max-files` | Attachment attributes mirrored from `/status` once it answers; `no-attachments` when uploads are off or no type is accepted. |
-| `conversations`, `active`, `heading` | Page only: the sidebar rows, the selected id, and the open conversation's title. |
+| `conversations`, `active`, `hasMore` | The list rows, the selected id, and whether "Load more" shows (`nextCursor`). On `<agent-page>` and `<agent-panel>` (shown with its `conversations-menu` attribute). |
+| `heading` | Page only: the open conversation's title. A panel keeps the heading the host gave it. |
 
 Entry shapes follow agent-panel's `element.d.ts`, plus two custom types the
 binding registers with `defineEntry()`:
@@ -304,11 +359,11 @@ Events handled:
 | `agent-stop` | `controller.stop()`. |
 | `agent-error-dismiss` | Forgets the binding's copy, so a repaint does not bring the banner back. |
 | `agent-select-conversation` | `controller.open(id)`; the event is cancelled so the row does not navigate. |
-| `agent-new-conversation` | `controller.newConversation()`. |
+| `agent-new-conversation` | `controller.startDraft()`: the first message creates the conversation. With `autoCreate: false`, `controller.newConversation()`. |
 | `agent-delete-conversation` | `controller.remove(id)`. |
 | `agent-rename` | `controller.rename(activeId, title)`; cancelled when no conversation is open. |
 | `agent-model-change` | Repaints, so the options menu offers the newly selected model's efforts. |
-| `agent-load-more` | `controller.loadMore()`. Not emitted by agent-panel 0.3.x: draw your own button in the page's `sidebar-end` slot and dispatch it, or call `binding.loadMore()`. |
+| `agent-load-more` | `controller.loadMore()`. agent-panel 0.4.0+ emits it from the list's built-in "Load more" (shown while `hasMore`). `binding.loadMore()` does the same from code. |
 
 Other `agent-action` kinds are ignored. Downloads use the `ChatClient` passed
 as `options.client`, then the controller's own client, and can be replaced with
@@ -321,7 +376,7 @@ element, not the class).
 helpers are exported for tests and custom hosts: `entriesFromState(state,
 { pendingText })`, `proposalEntryOf(proposal)`,
 `proposalEntriesFromState(state)`, `proposalErrorText(error)`,
-`errorText(error)`, `conversationsFromState(state)`,
+`errorText(error)`, `conversationsFromState(state)`, `hasConversationList(element)`,
 `modelsFromState(state)`, `effortOptionFromState(state, model)` and
 `isPageElement(element)`. `errorText` maps the failure codes a failed turn
 records (`provider_error`, `max_steps`, `internal_error`, …) to plain
