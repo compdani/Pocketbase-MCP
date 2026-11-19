@@ -52,6 +52,7 @@ await chat.send('Hello', { model: chat.state.choice || 'gpt-4.1' });
   choices,         // ChatModelChoice[]: provider/model pairs from /status
   defaultChoice,   // the server's default choice id
   choice,          // the picker's current choice id
+  context,         // how full the open conversation is, or null (see below)
 }
 ```
 
@@ -105,6 +106,34 @@ applies. The agent-panel binding adds a "Reasoning effort" entry to the
 element's options menu while the selected model has efforts ("Model default"
 sends none), keeps any options the host set itself, and passes the pick on
 each `agent-submit`. `effortOptionFromState(state, model)` returns that entry.
+
+## Context window
+
+When the server manages the model's context window (`features.contextManagement`,
+see [chat.md section 11](../../docs/chat.md#11-context-window-and-summaries)),
+`state.context` is `{ tokens, window, estimated, summarizedThrough,
+summarizedAt, compacting, canCompact }`. It comes with the conversation on
+`open()`, is refreshed after every turn, and is null for a draft or an older
+server. While a background summary is being written (`compacting`), the
+controller re-reads it every 3 seconds until it lands.
+
+```js
+await chat.compact();       // POST /conversations/{id}/compact; null on failure (see state.error)
+await chat.refreshContext(); // GET /conversations/{id}/context
+```
+
+`compact()` sets `context.compacting` while it runs. A refusal (`too_soon`
+within 30 s of the last summary, `active_turn`, `conflict`) keeps the last
+numbers and puts the error in `state.error`. The client methods are
+`client.getContext(id)` and `client.compactConversation(id)`.
+
+`bindAgentPanel` shows it: agent-panel 0.5 draws a ring in the composer once
+60% of the window is used, with a card whose **Compact** button calls
+`compact()`. With `{ contextUsage: 'slot' }`, older agent-panel versions get a
+small "72% context" button in the `composer-actions` slot instead (click to
+compact); `{ contextUsage: false }` shows nothing. The transcript gets a thin
+"Earlier messages are summarized for the model" divider (a `context-marker`
+entry) after the last summarized message.
 
 ## Page context
 
@@ -408,9 +437,10 @@ helpers are exported for tests and custom hosts: `entriesFromState(state,
 `proposalEntriesFromState(state)`, `proposalErrorText(error)`,
 `errorText(error)`, `conversationsFromState(state)`, `hasConversationList(element)`,
 `modelsFromState(state)`, `effortOptionFromState(state, model)` and
-`isPageElement(element)`. `errorText` maps the failure codes a failed turn
-records (`provider_error`, `max_steps`, `internal_error`, …) to plain
-language and never shows raw server text.
+`isPageElement(element)`, `contextUsageFromState(state)` and
+`renderContextMarkerEntry(entry)`. `errorText` maps the failure codes a failed
+turn records (`provider_error`, `max_steps`, `context_too_long`,
+`internal_error`, …) to plain language and never shows raw server text.
 
 ### `parseSSE` / reducer helpers
 

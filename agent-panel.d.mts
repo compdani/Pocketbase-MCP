@@ -129,6 +129,8 @@ export interface AgentPanelLike extends EventTarget {
   active?: string;
   hasMore?: boolean;
   draft?: string;
+  /** agent-panel 0.5+: the composer's context ring. */
+  contextUsage?: AgentContextUsage | null;
   setAttribute?(name: string, value: string): void;
   getAttribute?(name: string): string | null;
   removeAttribute?(name: string): void;
@@ -165,7 +167,36 @@ export interface AgentPanelBindingOptions {
    * reference. The default fetches the Blob and saves it.
    */
   download?: (uploadId: string, reference: AgentReference) => unknown | Promise<unknown>;
+  /**
+   * The context indicator. `'auto'` (default) writes agent-panel 0.5's
+   * `contextUsage` and compacts on `agent-compact`; `'slot'` also draws a
+   * small button into the `composer-actions` slot on older elements; `false`
+   * shows nothing.
+   */
+  contextUsage?: 'auto' | 'slot' | false;
 }
+
+/** agent-panel 0.5 `ContextUsage`. */
+export interface AgentContextUsage {
+  used: number;
+  window: number;
+  estimated?: boolean;
+  summarizedAt?: string;
+  compacting?: boolean;
+  canCompact?: boolean;
+}
+
+/** The custom entry type of the "earlier messages are summarized" divider. */
+export declare const CONTEXT_MARKER_TYPE: 'context-marker';
+export declare const CONTEXT_MARKER_TEXT: string;
+
+/** Draw the summary divider; null outside a browser. */
+export declare function renderContextMarkerEntry(entry: AgentEntry): HTMLElement | null;
+
+/** The element's `contextUsage` from controller state, or null without a known window. Pure. */
+export declare function contextUsageFromState(
+  state: Pick<ChatControllerState, 'context'> | null | undefined,
+): AgentContextUsage | null;
 
 export interface AgentPanelBinding {
   /** Remove every listener; the binding then never writes to the element. */
@@ -256,6 +287,7 @@ export declare function entriesFromState(
   state:
     | (Pick<ChatControllerState, 'messages' | 'turn' | 'running'> & {
       proposals?: ChatProposalEntry[];
+      context?: ChatControllerState['context'];
     })
     | null
     | undefined,

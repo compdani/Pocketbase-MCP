@@ -1150,3 +1150,59 @@ test('send passes an effort only when the resolved choice lists it', async () =>
   const efforts = client.calls.filter((c) => c.method === 'submitTurn').map((c) => c.options.effort);
   assert.deepEqual(efforts, ['high', undefined, undefined]);
 });
+
+// --- context window ----------------------------------------------------------
+
+const contextStatus = (overrides = {}) => ({
+  tokens: 80000, window: 100000, estimated: false, compacting: false, canCompact: true, ...overrides,
+});
+
+test('open keeps the server context and compact() updates it', async () => {
+  const client = makeClient();
+  client.detailResult = { ...detail(conversation('c1'), []), context: contextStatus() };
+  const controller = new ChatController({ client });
+  await controller.init();
+  await controller.open('c1');
+  assert.equal(controller.state.context.tokens, 80000);
+  assert.equal(controller.state.context.window, 100000);
+
+  client.compactResult = {
+    compacted: true,
+    throughMessageId: 'm5',
+    context: contextStatus({ tokens: 20000, summarizedThrough: 'm5', summarizedAt: '2026-11-19T10:00:00Z' }),
+  };
+  const pending = controller.compact();
+  assert.equal(controller.state.context.compacting, true, 'compacting while the request runs');
+  const result = await pending;
+  assert.equal(result.compacted, true);
+  assert.equal(controller.state.context.tokens, 20000);
+  assert.equal(controller.state.context.summarizedThrough, 'm5');
+  assert.equal(controller.state.context.compacting, false);
+
+  // A refused compaction keeps the last numbers and reports the error.
+  client.compactResult = new ChatApiError(429, 'too_soon', 'The conversation was summarized moments ago.');
+  assert.equal(await controller.compact(), null);
+  assert.equal(controller.state.context.tokens, 20000);
+  assert.equal(controller.state.context.compacting, false);
+  assert.equal(controller.state.error.code, 'too_soon');
+
+  controller.startDraft();
+  assert.equal(controller.state.context, null, 'a draft has no context');
+  assert.equal(await controller.compact(), null, 'nothing to compact without a conversation');
+});
+
+test('refreshContext reads the open conversation and ignores failures', async () => {
+  const client = makeClient();
+  client.detailResult = detail(conversation('c1'), []);
+  const controller = new ChatController({ client });
+  await controller.init();
+  await controller.open('c1');
+  assert.equal(controller.state.context, null, 'an older server sends no context');
+  client.contextResult = contextStatus({ tokens: 1234 });
+  await controller.refreshContext();
+  assert.equal(controller.state.context.tokens, 1234);
+  client.getContext = async () => { throw new Error('offline'); };
+  await controller.refreshContext();
+  assert.equal(controller.state.context.tokens, 1234);
+  assert.equal(controller.state.error, null);
+});

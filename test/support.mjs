@@ -195,6 +195,17 @@ export function makeClient(overrides = {}) {
       calls.push({ method: 'getConversation', id, options });
       return client.detailResult;
     },
+    contextResult: null,
+    compactResult: null,
+    async getContext(id) {
+      calls.push({ method: 'getContext', id });
+      return client.contextResult;
+    },
+    async compactConversation(id) {
+      calls.push({ method: 'compactConversation', id });
+      if (client.compactResult instanceof Error) throw client.compactResult;
+      return client.compactResult;
+    },
     async renameConversation(id, title) {
       calls.push({ method: 'renameConversation', id, title });
       return client.renameResult;
