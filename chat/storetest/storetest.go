@@ -96,6 +96,32 @@ func Run(t *testing.T, newStore func(t *testing.T) chat.Store) {
 	t.Run("RecentMessages", func(t *testing.T) {
 		testRecentMessages(t, newStore(t))
 	})
+	t.Run("CreateTurnTouchesConversation", func(t *testing.T) {
+		testCreateTurnTouchesConversation(t, newStore(t))
+	})
+}
+
+// testCreateTurnTouchesConversation checks that a new turn moves the
+// conversation's UpdatedAt, so a list shows when it last had activity.
+func testCreateTurnTouchesConversation(t *testing.T, s chat.Store) {
+	owner := ownerKey()
+	conv := mustCreateConversation(t, s, owner, "activity")
+	at := conv.UpdatedAt.Add(time.Hour).UTC().Truncate(time.Millisecond)
+	if _, created, err := s.CreateTurn(ctx(), owner, chat.Turn{
+		ConversationID: conv.ID, Owner: owner, IdempotencyKey: "touch", Model: "m", CreatedAt: at,
+	}); err != nil || !created {
+		t.Fatalf("CreateTurn: created=%v err=%v", created, err)
+	}
+	got, err := s.GetConversation(ctx(), owner, conv.ID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	if !got.UpdatedAt.Equal(at) {
+		t.Fatalf("UpdatedAt = %v, want the turn's creation time %v", got.UpdatedAt, at)
+	}
+	if got.Title != "activity" || !got.CreatedAt.Equal(conv.CreatedAt) {
+		t.Fatalf("CreateTurn changed more than UpdatedAt: %+v", got)
+	}
 }
 
 // testActiveTurnFastPath checks the optional ActiveTurnStore. A store without

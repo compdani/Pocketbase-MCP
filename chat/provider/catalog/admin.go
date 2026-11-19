@@ -349,6 +349,41 @@ func (a *Admin) SetDefaultChoice(ctx context.Context, providerID, model string) 
 	return nil
 }
 
+// TitleChoice reports the title model: chat.TitleChoiceAuto,
+// chat.TitleChoiceOff, or a choice id.
+func (a *Admin) TitleChoice(context.Context) (string, error) {
+	return a.router.TitleChoice(), nil
+}
+
+// SetTitleChoice stores the title model: mode chat.TitleChoiceAuto titles
+// with each turn's own model, chat.TitleChoiceOff turns titles off, and an
+// empty mode with a provider and model picks that model.
+func (a *Admin) SetTitleChoice(ctx context.Context, mode, providerID, model string) error {
+	var setting titleSetting
+	switch {
+	case mode == chat.TitleChoiceOff:
+		setting = titleSetting{Mode: chat.TitleChoiceOff}
+	case mode == chat.TitleChoiceAuto:
+		setting = titleSetting{Mode: chat.TitleChoiceAuto}
+	case mode != "":
+		return a.bad("Choose auto, off, or a provider and model.")
+	case providerID == "" || model == "":
+		return a.bad("Choose a provider and model.")
+	default:
+		if _, err := a.router.Resolve(ctx, providerID, model); err != nil {
+			return a.bad("That model is not available.")
+		}
+		setting = titleSetting{Provider: providerID, Model: model}
+	}
+	if err := a.store.SaveSetting(ctx, a.scope, titleSettingKey, setting); err != nil {
+		return a.storeError(err)
+	}
+	if err := a.router.Reload(ctx); err != nil {
+		return a.internal(err)
+	}
+	return nil
+}
+
 func (a *Admin) BeginSignIn(ctx context.Context, id, adminID string) (chat.SignInStart, error) {
 	ctx = context.WithoutCancel(ctx)
 	manager, err := a.codexManager(ctx, id)

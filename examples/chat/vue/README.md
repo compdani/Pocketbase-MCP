@@ -31,7 +31,7 @@ npm run build   # production build
 
 `agent-panel` is a dependency installed by `npm install` from
 [github.com/compdani/agent-panel](https://github.com/compdani/agent-panel),
-pinned to `v0.3.1` in `package.json`. The chat client is this repo's own
+pinned to `v0.4.0` in `package.json`. The chat client is this repo's own
 code, which `vite.config.js` maps to folders on disk:
 
 | Import | Resolves to |
@@ -62,7 +62,7 @@ The same `ChatPage.vue` works in Nuxt with three changes:
 
 1. **Render it in the browser only:** wrap the chat screen in `<ClientOnly>`
    (or set `ssr: false`). Keep the sign-in form outside it.
-2. **Config:** add `"agent-panel": "github:compdani/agent-panel#v0.3.1"` to
+2. **Config:** add `"agent-panel": "github:compdani/agent-panel#v0.4.0"` to
    the app's dependencies, then set the custom-element rule, the `/api` proxy
    and the chat-client aliases in `nuxt.config.ts`:
 

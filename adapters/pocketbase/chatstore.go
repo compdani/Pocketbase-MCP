@@ -685,6 +685,17 @@ func chatFindOwned(app core.App, collection string, owner chat.OwnerKey, id stri
 	return rec, nil
 }
 
+// chatTouchConversation moves a conversation's updatedAt to at, so the list
+// shows when it last had activity (a new turn), not only when it was renamed.
+func chatTouchConversation(ctx context.Context, tx core.App, collection string, owner chat.OwnerKey, id string, at time.Time) error {
+	rec, err := chatFindOwned(tx, collection, owner, id)
+	if err != nil {
+		return err
+	}
+	rec.Set(chatFieldUpdatedAt, at)
+	return tx.SaveWithContext(ctx, rec)
+}
+
 // chatFirst returns ErrNotFound when the filter matches nothing.
 func chatFirst(app core.App, collection, filter string, params dbx.Params) (*core.Record, error) {
 	rec, err := app.FindFirstRecordByFilter(collection, filter, params)
@@ -1124,6 +1135,9 @@ func (s *ChatStore) CreateTurn(ctx context.Context, owner chat.OwnerKey, t chat.
 			return err
 		}
 		out, created = chatTurnFrom(rec), true
+		if err := chatTouchConversation(ctx, tx, s.conversations, owner, t.ConversationID, createdAt); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {

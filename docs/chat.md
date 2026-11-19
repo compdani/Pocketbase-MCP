@@ -95,7 +95,7 @@ ever read from that header, never from a URL.
 | Route | Does |
 |---|---|
 | `GET /status` | Models, limits and which features are on |
-| `GET /conversations` | The caller's conversations, newest first, optionally by target |
+| `GET /conversations` | The caller's conversations, newest first (by creation), optionally by target. `updatedAt` is the last activity: a rename, a generated title or a new turn |
 | `POST /conversations` | Create one, optionally tied to a target record |
 | `GET /conversations/{id}` | Transcript plus open proposals |
 | `PATCH /conversations/{id}` | Rename |
@@ -113,6 +113,7 @@ ever read from that header, never from a URL.
 When managed providers are on, the same prefix also serves a superuser-only
 settings surface: `GET/POST /providers`, `GET/PATCH/DELETE /providers/{id}`,
 `POST /providers/actions/test`, `POST /providers/actions/default`,
+`POST /providers/actions/title` (see [Conversation titles](#conversation-titles)),
 `POST /providers/{id}/test`, `POST /providers/{id}/models/refresh`, and the Codex
 `signin`, `signin/complete`, `signin/cancel`, `signout` and `import` routes. It
 uses a separate superuser authenticator and never widens the normal chat
@@ -447,6 +448,30 @@ paid or remotely hosted deployment is expected to apply through OpenAI's
 interest form; do not assume plan tokens may be shared by an arbitrary
 production deployment.
 
+### Conversation titles
+
+Titles are off by default. When on, the first message sent to an untitled
+conversation is also sent, alone and with no tools, to a title model at the
+lowest reasoning effort it lists; the cleaned reply (at most 60 characters) is
+stored with a rename, unless the conversation was titled meanwhile. The
+request runs alongside the turn, and a completed turn waits up to 5 seconds
+for it before its terminal event, so a client that re-reads the list when a
+turn ends already sees the title. A failure is logged and changes nothing; the
+next message tries again.
+
+Pick the title model in one of three places (first match wins):
+
+1. **The admin setting** (managed mode). `POST /providers/actions/title`
+   with `{"mode":"auto"}` (each turn's own model), `{"mode":"off"}`, or
+   `{"provider":"openai","model":"gpt-5-mini"}` (a quick model; it must be an
+   available choice). `GET /providers` reports it as `titleChoice`: `auto`,
+   `off` or a choice id. A chosen model that later becomes unavailable falls
+   back to the turn's model.
+2. **`ChatConfig.TitleModel`** in the adapters (`MCP_CHAT_TITLE_MODEL` in the
+   examples): `auto`, `off`, a choice id (`provider::model`) or a model id.
+3. **`RunnerConfig.Titles`** (`chat.TitleConfig`) for a custom runner: a
+   `Model` func, `Timeout` and `Wait`.
+
 ### Settings storage
 
 Managed mode provisions three private collections with the chat prefix:
@@ -471,7 +496,17 @@ browser package:
   applies approved editor proposals and reports the outcome.
 - `bindAgentPanel`: connects the controller to the `<agent-panel>` /
   `<agent-page>` web components: approve and reject buttons, outcome notes,
-  attachment chips and composer limits taken from `/status`.
+  attachment chips and composer limits taken from `/status`, and the
+  conversation list (the page's sidebar, or the panel's `conversations-menu`
+  switcher). It requires
+  [agent-panel](https://github.com/compdani/agent-panel) **v0.4.0 or later**
+  (`npm install github:compdani/agent-panel#v0.4.0`).
+- **List sync**: each controller re-reads its conversation list after a turn
+  ends, on focus and once a minute while visible, and announces its own
+  changes to other controllers for the same account (other elements on the
+  page, other tabs) over a `BroadcastChannel`, so a page and a side panel
+  never disagree. The open conversation is cleared only when the server
+  answers 404 for it.
 
 See [frontend/client/README.md](../frontend/client/README.md) for the API.
 
@@ -491,6 +526,7 @@ attached files are acknowledged. Environment variables for both examples:
 | `MCP_CHAT_MANAGE` | `true` starts managed mode with no seed; the settings API adds providers |
 | `MCP_CHAT_PROPOSALS`, `MCP_CHAT_AUTO_APPROVE`, `MCP_CHAT_ARG_EDITS` | Proposal settings (proposals need `MCP_ALLOW_WRITES=true`) |
 | `MCP_CHAT_UPLOADS`, `MCP_CHAT_MAX_UPLOAD_BYTES` | Upload settings |
+| `MCP_CHAT_TITLE_MODEL` | Conversation titles: `auto`, `off` (default), a model or `provider::model`; the admin setting wins in managed mode |
 
 ## 10. Limits
 

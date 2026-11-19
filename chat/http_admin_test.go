@@ -169,3 +169,78 @@ func TestProviderAdminWrongMethodIs405(t *testing.T) {
 		}
 	}
 }
+
+// titleProviderAdmin adds the optional TitleAdmin extension.
+type titleProviderAdmin struct {
+	fakeProviderAdmin
+	choice string
+	mode   string
+}
+
+func (f *titleProviderAdmin) TitleChoice(context.Context) (string, error) { return f.choice, nil }
+
+func (f *titleProviderAdmin) SetTitleChoice(_ context.Context, mode, providerID, model string) error {
+	f.mode = mode
+	switch {
+	case mode != "":
+		f.choice = mode
+	case providerID != "":
+		f.choice = ChoiceID(providerID, model)
+	default:
+		f.choice = TitleChoiceAuto
+	}
+	return nil
+}
+
+func TestProviderAdminTitleChoice(t *testing.T) {
+	store := NewMemStore(MemStoreOptions{})
+	runner := mustRunner(t, RunnerConfig{Store: store, Provider: scripted.New()})
+	admin := &titleProviderAdmin{choice: TitleChoiceAuto}
+	h, err := NewHandler(HandlerConfig{
+		Prefix: testPrefix, Runner: runner, Store: store, Auth: newFakeAuth(),
+		AdminAuth: fakeAdminAuth{}, ProviderAdmin: admin,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(method, path, body string) *recorder {
+		req, _ := http.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer root")
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := newRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := do(http.MethodGet, testPrefix+"/providers", ""); !strings.Contains(rec.String(), `"titleChoice":"auto"`) {
+		t.Fatalf("list = %d %s", rec.code, rec.String())
+	}
+	rec := do(http.MethodPost, testPrefix+"/providers/actions/title", `{"provider":"openai","model":"m1"}`)
+	if rec.code != http.StatusOK || !strings.Contains(rec.String(), `"titleChoice":"openai::m1"`) {
+		t.Fatalf("set = %d %s", rec.code, rec.String())
+	}
+	rec = do(http.MethodPost, testPrefix+"/providers/actions/title", `{"mode":"OFF"}`)
+	if rec.code != http.StatusOK || admin.mode != TitleChoiceOff {
+		t.Fatalf("off = %d %s mode=%q", rec.code, rec.String(), admin.mode)
+	}
+	if rec := do(http.MethodGet, testPrefix+"/providers/actions/title", ""); rec.code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET title action = %d", rec.code)
+	}
+
+	// An admin without the extension has no title route and no titleChoice.
+	plain, err := NewHandler(HandlerConfig{
+		Prefix: testPrefix, Runner: runner, Store: store, Auth: newFakeAuth(),
+		AdminAuth: fakeAdminAuth{}, ProviderAdmin: &fakeProviderAdmin{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, testPrefix+"/providers", nil)
+	req.Header.Set("Authorization", "Bearer root")
+	list := newRecorder()
+	plain.ServeHTTP(list, req)
+	if strings.Contains(list.String(), "titleChoice") {
+		t.Fatalf("plain admin list = %s", list.String())
+	}
+}

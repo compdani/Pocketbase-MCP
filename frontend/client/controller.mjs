@@ -14,6 +14,13 @@
 //     is terminal (there is no cursor to replay after a resync);
 //   - a terminal event reloads the transcript once, so messages are canonical.
 //
+// List sync: the conversation list is re-read after every finished turn, when
+// the page becomes visible or focused again, on a slow interval while visible,
+// and whenever another controller for the same account (another element on the
+// page, or another tab) announces a change over a BroadcastChannel. A refresh
+// merges the first page over what is loaded and never shows another account's
+// rows (the channel name is the account key).
+//
 // Account safety: state belongs to the account key derived from
 // appUrl|mount|authCollectionId|userId. Changing it aborts every request and
 // clears everything before initialising again. Nothing is persisted.
@@ -38,6 +45,9 @@ import {
 } from './reducer.mjs';
 
 const IDLE_TIMEOUT_MS = 45000;
+const SYNC_INTERVAL_MS = 60000;
+const SYNC_DEBOUNCE_MS = 250;
+const SYNC_CHANNEL_PREFIX = 'pocketbase-mcp-chat:';
 
 /** File extensions a browser often leaves untyped, mapped to the server's MIME. */
 const MIME_BY_EXTENSION = Object.freeze({
@@ -281,6 +291,60 @@ function linkAbort(parent, child) {
   return () => parent.removeEventListener('abort', onAbort);
 }
 
+/** Newest first by (createdAt, id), the server's list order. */
+function isOlder(a, b) {
+  const ta = Date.parse(a?.createdAt ?? '');
+  const tb = Date.parse(b?.createdAt ?? '');
+  if (Number.isNaN(ta) || Number.isNaN(tb)) return null;
+  if (ta !== tb) return ta < tb;
+  return String(a.id) < String(b.id);
+}
+
+/**
+ * Merge a fresh first page into the loaded list. Rows the page returns replace
+ * their old copies; rows it covers but does not return were deleted; rows
+ * older than the page's last row (loaded with loadMore) are kept. `covers(id)`
+ * reports whether the page's range included a loaded row.
+ */
+export function mergeConversationPage(loaded, page) {
+  const items = (Array.isArray(page?.items) ? page.items : [])
+    .filter((c) => c && typeof c === 'object' && c.id !== undefined && c.id !== null);
+  const pageCursor = typeof page?.nextCursor === 'string' ? page.nextCursor : '';
+  const current = Array.isArray(loaded) ? loaded : [];
+  const fresh = new Set(items.map((c) => String(c.id)));
+  if (!pageCursor) {
+    // The page is the whole list.
+    return { conversations: items, nextCursor: '', covers: () => true, complete: true };
+  }
+  const last = items[items.length - 1];
+  const lastIndex = last ? current.findIndex((c) => String(c?.id) === String(last.id)) : -1;
+  const beyond = (row, index) => {
+    if (!last) return false;
+    const older = isOlder(row, last);
+    if (older !== null) return older;
+    // No timestamps: fall back to the loaded order.
+    return lastIndex >= 0 && index > lastIndex;
+  };
+  const kept = current.filter((row, index) => row && !fresh.has(String(row.id)) && beyond(row, index));
+  const keptIds = new Set(kept.map((c) => String(c.id)));
+  return {
+    conversations: [...items, ...kept],
+    // Rows beyond the first page were loaded with loadMore: keep their cursor.
+    nextCursor: kept.length > 0 ? null : pageCursor,
+    covers: (id) => fresh.has(String(id)) || !keptIds.has(String(id)),
+    complete: false,
+  };
+}
+
+function sameConversations(a, b) {
+  if (a.length !== b.length) return false;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
 function errorOf(err) {
   if (err && typeof err === 'object') {
     return {
@@ -316,6 +380,7 @@ export class ChatController extends EventTarget {
     reconnect = {},
     idleTimeoutMs = IDLE_TIMEOUT_MS,
     editor = null,
+    sync = {},
   } = {}) {
     super();
     if (!client) throw new TypeError('ChatController requires a client');
@@ -347,6 +412,22 @@ export class ChatController extends EventTarget {
     this._disposed = false;
     this._active = 0;
     this._idleWaiters = [];
+
+    // List sync (see the header). `sync: false` turns all of it off.
+    const syncOptions = sync === false ? null : (sync && typeof sync === 'object' ? sync : {});
+    this._sync = syncOptions && {
+      channel: syncOptions.channel !== false,
+      focus: syncOptions.focus !== false,
+      intervalMs: syncOptions.intervalMs === undefined ? SYNC_INTERVAL_MS : Number(syncOptions.intervalMs) || 0,
+    };
+    this._syncId = newIdempotencyKey();
+    this._syncChannel = null;
+    this._syncTimer = null;
+    this._syncInterval = null;
+    this._syncListeners = [];
+    this._listVersion = 0;
+    this._refreshToken = 0;
+    this._startSync();
   }
 
   /** The immutable state snapshot. */
@@ -374,6 +455,82 @@ export class ChatController extends EventTarget {
     if (patch.messages !== undefined) next.transcript = transcriptFromMessages(next.messages);
     this._state = next;
     this.dispatchEvent(new Event('change'));
+  }
+
+  // --- list sync ---
+
+  _startSync() {
+    this._stopSync();
+    const sync = this._sync;
+    if (!sync || this._disposed) return;
+    if (sync.channel && this._accountKey && typeof globalThis.BroadcastChannel === 'function') {
+      try {
+        const channel = new globalThis.BroadcastChannel(SYNC_CHANNEL_PREFIX + this._accountKey);
+        channel.onmessage = (event) => {
+          const data = event?.data;
+          if (data && data.type === 'conversations' && data.from !== this._syncId) this._scheduleRefresh();
+        };
+        // Node keeps a process alive for an open channel; a browser ignores this.
+        if (typeof channel.unref === 'function') channel.unref();
+        this._syncChannel = channel;
+      } catch {
+        this._syncChannel = null;
+      }
+    }
+    const doc = globalThis.document;
+    const visible = () => !doc || doc.visibilityState !== 'hidden';
+    if (sync.focus && doc && typeof doc.addEventListener === 'function') {
+      const onVisible = () => { if (visible()) this._scheduleRefresh(); };
+      doc.addEventListener('visibilitychange', onVisible);
+      this._syncListeners.push([doc, 'visibilitychange', onVisible]);
+      if (typeof globalThis.addEventListener === 'function') {
+        const onFocus = () => this._scheduleRefresh();
+        globalThis.addEventListener('focus', onFocus);
+        this._syncListeners.push([globalThis, 'focus', onFocus]);
+      }
+    }
+    if (sync.intervalMs > 0) {
+      this._syncInterval = setInterval(() => { if (visible()) this._scheduleRefresh(); }, sync.intervalMs);
+      if (typeof this._syncInterval?.unref === 'function') this._syncInterval.unref();
+    }
+  }
+
+  _stopSync() {
+    if (this._syncChannel) {
+      try { this._syncChannel.close(); } catch { /* already closed */ }
+      this._syncChannel = null;
+    }
+    for (const [target, type, handler] of this._syncListeners) target.removeEventListener(type, handler);
+    this._syncListeners = [];
+    if (this._syncInterval !== null) clearInterval(this._syncInterval);
+    this._syncInterval = null;
+    if (this._syncTimer !== null) clearTimeout(this._syncTimer);
+    this._syncTimer = null;
+  }
+
+  _scheduleRefresh() {
+    if (this._disposed || this._syncTimer !== null) return;
+    this._syncTimer = setTimeout(() => {
+      this._syncTimer = null;
+      void this.refreshConversations();
+    }, SYNC_DEBOUNCE_MS);
+    if (typeof this._syncTimer?.unref === 'function') this._syncTimer.unref();
+  }
+
+  /** Tell other controllers for this account that the list changed. */
+  _announce() {
+    if (!this._syncChannel) return;
+    try {
+      this._syncChannel.postMessage({ type: 'conversations', from: this._syncId });
+    } catch {
+      // A closed channel: nothing to tell.
+    }
+  }
+
+  /** A local write changed the list: invalidate in-flight refreshes, tell others. */
+  _listChanged() {
+    this._listVersion += 1;
+    this._announce();
   }
 
   _track(promise) {
@@ -572,6 +729,10 @@ export class ChatController extends EventTarget {
         patch.proposals = this._mergeServerProposals(detail.proposals);
       }
       if (Object.keys(patch).length > 0) this._set(patch);
+      // A finished turn moves the conversation's activity time, and the server
+      // may have titled it: re-read the list here and in other controllers.
+      this._announce();
+      void this.refreshConversations();
     } catch (err) {
       if (this._disposed || epoch !== this._epoch) return;
       if (isAbort(err)) return;
@@ -743,6 +904,8 @@ export class ChatController extends EventTarget {
     // Clear everything the previous account owned before any new request.
     this._state = initialState();
     this.dispatchEvent(new Event('change'));
+    // The sync channel is named after the account: reopen it for the new one.
+    this._startSync();
 
     if (!accountKey) return this._state;
     return this._track(this._init());
@@ -751,6 +914,7 @@ export class ChatController extends EventTarget {
   /** Drop every subscription. The controller is unusable afterwards. */
   dispose() {
     if (this._disposed) return;
+    this._stopSync();
     this._disposed = true;
     this._epoch += 1;
     this._openToken += 1;
@@ -788,6 +952,96 @@ export class ChatController extends EventTarget {
       if (isAbort(err)) return this._state;
       this._set({ error: errorOf(err) });
     }
+    return this._state;
+  }
+
+  /**
+   * Re-read the first conversation page and merge it into the list: new and
+   * renamed rows appear, deleted ones go, rows loaded with loadMore stay. When
+   * the open conversation was deleted elsewhere, the view is cleared.
+   */
+  refreshConversations() {
+    return this._track(this._refreshConversations());
+  }
+
+  async _refreshConversations(retry = 0) {
+    if (this._disposed || this._state.status !== 'ready') return this._state;
+    const epoch = this._epoch;
+    const token = (this._refreshToken += 1);
+    const version = this._listVersion;
+    let page;
+    try {
+      page = await this._client.listConversations({});
+    } catch (err) {
+      // A background refresh never shows an error: the next one tries again.
+      return this._state;
+    }
+    if (!this._current(epoch) || token !== this._refreshToken) return this._state;
+    if (version !== this._listVersion) {
+      // A local write landed while the page was in flight; the page may predate
+      // it. Read again rather than undo it.
+      return retry < 2 ? this._refreshConversations(retry + 1) : this._state;
+    }
+    const merged = mergeConversationPage(this._state.conversations, page);
+    const patch = {
+      conversations: merged.conversations,
+      nextCursor: merged.nextCursor === null ? this._state.nextCursor : merged.nextCursor,
+    };
+    const activeId = this._state.activeConversationId;
+    const activeRow = activeId
+      ? this._state.conversations.find((c) => String(c?.id) === String(activeId))
+      : null;
+    let gone = false;
+    if (activeRow && merged.covers(activeId)
+      && !merged.conversations.some((c) => String(c.id) === String(activeId))) {
+      // Missing from a page that should hold it: deleted elsewhere (another
+      // tab, device or element)? Only a 404 says so; anything else keeps it.
+      try {
+        await this._client.getConversation(activeId, { limit: 1 });
+      } catch (err) {
+        gone = err instanceof ChatApiError && err.status === 404;
+      }
+      if (!this._current(epoch) || token !== this._refreshToken) return this._state;
+      if (activeId !== this._state.activeConversationId) return this._state;
+      if (!gone) patch.conversations = [activeRow, ...patch.conversations];
+    }
+    if (gone) {
+      this._stopStream();
+      this._openToken += 1;
+      Object.assign(patch, {
+        activeConversationId: null,
+        messages: [],
+        proposals: [],
+        pendingUploads: [],
+        turn: null,
+        running: false,
+      });
+    }
+    const same = patch.nextCursor === this._state.nextCursor
+      && !('activeConversationId' in patch)
+      && sameConversations(patch.conversations, this._state.conversations);
+    if (!same) this._set(patch);
+    return this._state;
+  }
+
+  /**
+   * Leave the open conversation without creating one: the view is empty and
+   * the next send() creates the conversation (a "New chat" that never gets a
+   * message leaves nothing behind on the server).
+   */
+  startDraft() {
+    if (this._disposed) return this._state;
+    this._stopStream();
+    this._openToken += 1;
+    this._set({
+      activeConversationId: null,
+      messages: [],
+      proposals: [],
+      pendingUploads: [],
+      turn: null,
+      running: false,
+      error: null,
+    });
     return this._state;
   }
 
@@ -881,6 +1135,7 @@ export class ChatController extends EventTarget {
         running: false,
         error: null,
       });
+      this._listChanged();
       return conversation;
     } catch (err) {
       if (!this._current(epoch)) return null;
@@ -905,6 +1160,7 @@ export class ChatController extends EventTarget {
         ),
         error: null,
       });
+      this._listChanged();
       return conversation;
     } catch (err) {
       if (!this._current(epoch)) return null;
@@ -941,6 +1197,7 @@ export class ChatController extends EventTarget {
           : {}),
         error: null,
       });
+      this._listChanged();
       return true;
     } catch (err) {
       if (!this._current(epoch)) return false;
@@ -1388,6 +1645,8 @@ export class ChatController extends EventTarget {
       error: turn.error ?? null,
     };
     this._set({ turn: view, running: !isTerminalState(turn.state), error: null, pendingUploads });
+    // The conversation's activity time moved on the server.
+    this._listChanged();
 
     if (isTerminalState(turn.state)) {
       await this._reloadTranscript(conversationId, { epoch });

@@ -107,3 +107,14 @@ type ProviderAdmin interface {
 	SignOut(ctx context.Context, id string) error
 	ImportCredentials(ctx context.Context, id string, raw json.RawMessage) (ProviderView, error)
 }
+
+// TitleAdmin is an optional ProviderAdmin extension for the model that titles
+// conversations. When the admin implements it, GET /providers reports
+// titleChoice and POST /providers/actions/title changes it.
+type TitleAdmin interface {
+	// TitleChoice reports TitleChoiceAuto, TitleChoiceOff or a choice id.
+	TitleChoice(ctx context.Context) (string, error)
+	// SetTitleChoice stores the title model: mode TitleChoiceAuto or
+	// TitleChoiceOff, or an empty mode with a provider and model.
+	SetTitleChoice(ctx context.Context, mode, providerID, model string) error
+}

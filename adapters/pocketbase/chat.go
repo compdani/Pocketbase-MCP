@@ -68,6 +68,13 @@ type ChatConfig struct {
 	// the chat default (24 hours). It only applies to the runner this config
 	// builds, and it requires Options.Proposals.
 	ProposalTTL time.Duration
+	// TitleModel turns on automatic conversation titles, made from each new
+	// conversation's first message: "auto" titles with the turn's own model,
+	// a choice id ("provider::model") or model id names a (quick, cheap) model,
+	// and "" or "off" leaves titles off. With ManageProviders, the title model
+	// an administrator sets (POST /providers/actions/title) wins. A
+	// RunnerConfig.Titles set by the host replaces all of this.
+	TitleModel string
 }
 
 // chatMount is the registered chat surface: its HTTP handler and the runner
@@ -187,10 +194,11 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 			}
 		}
 		built, err := catalog.NewRouter(context.Background(), catalog.RouterOptions{
-			Scope:  scope,
-			Store:  providerStore,
-			Static: staticProviders(cfg),
-			Logger: s.Adapter.app.Logger(),
+			TitleChoice: cfg.TitleModel,
+			Scope:       scope,
+			Store:       providerStore,
+			Static:      staticProviders(cfg),
+			Logger:      s.Adapter.app.Logger(),
 		})
 		if err != nil {
 			return fmt.Errorf("pocketbase: provider catalog: %w", err)
@@ -220,6 +228,9 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 			cfg.RunnerConfig.Router = router
 		}
 		cfg.RunnerConfig.System = cfg.System
+		if cfg.RunnerConfig.Titles == nil {
+			cfg.RunnerConfig.Titles = chatTitles(cfg, router != nil)
+		}
 		if cfg.RunnerConfig.Logger == nil {
 			// Failed turns record only a generic message; the cause goes to
 			// the app log, next to PocketBase's own request log.
@@ -410,4 +421,34 @@ func (s *Server) registerChatRoutes(r *router.Router[*core.RequestEvent]) error 
 func (s *Server) handleChat(e *core.RequestEvent) error {
 	s.chat.handler.ServeHTTP(e.Response, e.Request)
 	return nil
+}
+
+// chatTitles is the default title configuration. A catalog router decides
+// off, auto or a model itself (it reads the admin setting, then TitleModel);
+// the legacy single provider titles only when TitleModel asks, with the
+// turn's model or the named model on that provider.
+func chatTitles(cfg ChatConfig, catalogMode bool) *chat.TitleConfig {
+	choice := strings.TrimSpace(cfg.TitleModel)
+	if catalogMode {
+		return &chat.TitleConfig{}
+	}
+	if choice == "" || strings.EqualFold(choice, chat.TitleChoiceOff) {
+		return nil
+	}
+	if strings.EqualFold(choice, chat.TitleChoiceAuto) {
+		return &chat.TitleConfig{}
+	}
+	if _, model, ok := chat.SplitChoiceID(choice); ok {
+		choice = model
+	}
+	return &chat.TitleConfig{Model: func(_ context.Context, turn chat.ResolvedModel) (chat.ResolvedModel, bool) {
+		if cfg.Provider == nil {
+			return turn, true
+		}
+		return chat.ResolvedModel{
+			Choice:   chat.ModelChoice{Provider: turn.Choice.Provider, Model: choice},
+			Provider: cfg.Provider,
+			Model:    choice,
+		}, true
+	}}
 }

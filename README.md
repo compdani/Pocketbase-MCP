@@ -25,7 +25,7 @@ used from a chat panel inside your own app.
 | `adapters/pbpostgress/` | Adapter for the pb-postgress fork. |
 | `auth/stockoauth/` | OAuth sign-in for stock PocketBase (the fork has its own). |
 | `chat/` | Optional chat service: turns, streaming, proposals, uploads, provider adapters. |
-| `frontend/client/` | Dependency-free browser client for the chat API, with an `<agent-panel>` binding. |
+| `frontend/client/` | Dependency-free browser client for the chat API, with an `<agent-panel>` binding (needs [agent-panel](https://github.com/compdani/agent-panel) v0.4.0+). |
 | `examples/stock/`, `examples/fork/` | Runnable example apps, one per host. |
 | `examples/chat/` | Plain JS, Vue and Svelte chat front ends. |
 | `verification/` | Milestone test reports. |

@@ -167,6 +167,11 @@ func main() {
 //	MCP_CHAT_UPLOADS       true turns chat attachments on (upload, download
 //	                       and attachment turns)
 //	MCP_CHAT_MAX_UPLOAD_BYTES  optional per-file byte limit for attachments
+//	MCP_CHAT_TITLE_MODEL    titles new conversations from their first message:
+//	                        auto (the turn's model), a model or a
+//	                        "provider::model" choice, or off (the default); in
+//	                        managed mode the admin setting
+//	                        (POST /providers/actions/title) wins
 //
 // It must run before RegisterRoutes, which mounts the chat handler when chat is
 // enabled. The chat collections live in the shared database and are scoped to
@@ -221,6 +226,7 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 			}
 		}
 		if err := srv.EnableChat(pb.ChatConfig{
+			TitleModel:      os.Getenv("MCP_CHAT_TITLE_MODEL"),
 			Options:         opts,
 			ManageProviders: true,
 			Providers:       providers,
@@ -264,10 +270,11 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 	}
 
 	if err := srv.EnableChat(pb.ChatConfig{
-		Options:  opts,
-		Provider: prov,
-		Model:    model,
-		System:   system,
+		TitleModel: os.Getenv("MCP_CHAT_TITLE_MODEL"),
+		Options:    opts,
+		Provider:   prov,
+		Model:      model,
+		System:     system,
 	}); err != nil {
 		return fmt.Errorf("enable chat: %w", err)
 	}

@@ -25,7 +25,7 @@ answers with canned text. From the repository root:
 cd examples/stock && GOWORK=off go build -o /tmp/pbmcp-stock-demo . && cd ../..
 
 MCP_CHAT_PROVIDER=demo MCP_CHAT_PROPOSALS=true MCP_ALLOW_WRITES=true \
-  MCP_CHAT_UPLOADS=true MCP_SEED_DEMO=true \
+  MCP_CHAT_UPLOADS=true MCP_SEED_DEMO=true MCP_CHAT_TITLE_MODEL=auto \
   MCP_MANIFEST="$PWD/examples/stock/manifest.json" \
   /tmp/pbmcp-stock-demo serve --http 127.0.0.1:8090 --dir /tmp/pbmcp-chat-demo
 ```
@@ -36,6 +36,7 @@ MCP_CHAT_PROVIDER=demo MCP_CHAT_PROPOSALS=true MCP_ALLOW_WRITES=true \
 - `MCP_CHAT_PROPOSALS=true` turns on proposals (it needs
   `MCP_ALLOW_WRITES=true`) and registers the editor tool `edit_note`.
 - `MCP_CHAT_UPLOADS=true` turns on attachments.
+- `MCP_CHAT_TITLE_MODEL=auto` titles new conversations (off by default).
 - Leave `MCP_CHAT_MODEL` unset; the demo uses `demo-1`.
 
 The log confirms it: `chat enabled with the OFFLINE DEMO provider … at
@@ -46,7 +47,8 @@ The log confirms it: `chat enabled with the OFFLINE DEMO provider … at
 See each example's README. Every one proxies `/api` to the server on
 `PB_URL` (default `http://127.0.0.1:8090`) and streams events through
 unbuffered. They use
-[agent-panel](https://github.com/compdani/agent-panel) `v0.3.1`: Vue and
+[agent-panel](https://github.com/compdani/agent-panel) `v0.4.0` (the
+minimum the binding supports): Vue and
 Svelte install it with `npm install`, and the plain example loads it from
 jsDelivr. Set `AGENT_PANEL_DIR` to use a local agent-panel checkout instead.
 
@@ -62,9 +64,22 @@ Sign in as `demo@example.com` / `password123`, then:
 | `edit rev:0 New text` | The model proposes `edit_note`. Only the plain example can apply it: approving changes the note and bumps its revision ("Applied in the editor — not saved yet"). Use the revision the note shows; an old one is reported as out of date. Vue and Svelte show the card, but approving reports `editor_unavailable`. |
 | a file, via the paperclip, paste or drop | It's uploaded and shown as a chip on your message; clicking the chip downloads it. The demo replies with the file's name. Limits come from `/status`. |
 
-**New chat**, the sidebar, rename and delete all work. With no conversation
-open, the first message creates one. Vue and Svelte page long conversation
-lists with a **Load more** button.
+**New chat**, the sidebar, rename and delete all work. **New chat** starts a
+draft: the first message creates the conversation. The sidebar ends with
+agent-panel's built-in **Load more** while the server has another page.
+
+**The list stays in sync.** Open the plain example's **Side panel** (an
+`<agent-panel conversations-menu>` with its own controller), or a second tab:
+a chat started, renamed or deleted in one view appears in the other. Each
+controller re-reads the list after every turn, on focus and once a minute,
+and tells the others for the same account over a `BroadcastChannel`.
+
+**Titles.** Start the server with `MCP_CHAT_TITLE_MODEL=auto` and a new
+conversation is titled from its first message (the demo provider uses the
+message's first words). The title is stored before the turn's last event, so
+both views show it when the reply finishes. In managed provider mode, an
+administrator can pick a quicker model with `POST
+/api/mcp/chat/v1/providers/actions/title` instead.
 
 ## Notes
 

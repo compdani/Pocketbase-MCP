@@ -10,6 +10,13 @@
 // chat-only `edit_note` tool produces an editor proposal; approving it runs
 // validatePatch/applyPatch here, and nothing is ever saved to PocketBase.
 //
+// The optional side panel is a second `<agent-panel conversations-menu>` with
+// its own ChatController for the same account, the way an app's global
+// assistant panel sits beside a full chat page. Neither view tells the other
+// anything: each controller re-reads its list after a turn and announces its
+// own changes over a BroadcastChannel named after the account, so a chat made,
+// renamed, titled or deleted in one shows up in the other (and in other tabs).
+//
 // Served by ./serve.mjs, which also proxies /api/ to PocketBase, so this page
 // and the API share one origin and need no CORS.
 //
@@ -24,6 +31,7 @@
 // decide its own persistence policy.
 
 import '/agent-panel/page.js';
+import '/agent-panel/index.js';
 import { ChatClient, ChatController } from '/client/index.mjs';
 import { bindAgentPanel } from '/client/agent-panel.mjs';
 
@@ -37,6 +45,8 @@ const appView = document.getElementById('app');
 const who = document.getElementById('who');
 const logoutButton = document.getElementById('logout');
 const page = document.getElementById('page');
+const side = document.getElementById('side');
+const toggleSide = document.getElementById('toggle-side');
 const noteText = document.getElementById('note-text');
 const noteRevision = document.getElementById('note-revision');
 
@@ -98,7 +108,7 @@ renderNote();
 
 /** The bearer token for this tab. Lost on reload, on purpose (see above). */
 let token = '';
-/** { controller, client, binding } while signed in. */
+/** { client, controller, binding, sideController, sideBinding } while signed in. */
 let session = null;
 
 function setLoginError(message) {
@@ -106,15 +116,27 @@ function setLoginError(message) {
 }
 
 function clearChat() {
-  // The element keeps drawing what it was last given, so reset it after the
-  // binding is gone; otherwise the previous account's rows would linger.
-  page.entries = [];
-  page.conversations = [];
-  page.active = '';
+  // The elements keep drawing what they were last given, so reset them after
+  // the bindings are gone; otherwise the previous account's rows would linger.
+  for (const element of [page, side]) {
+    element.entries = [];
+    element.conversations = [];
+    element.active = '';
+    element.hasMore = false;
+    element.running = false;
+    element.error = '';
+  }
   page.setAttribute('heading', '');
-  page.running = false;
-  page.error = '';
+  setSideOpen(false);
 }
+
+function setSideOpen(open) {
+  side.hidden = !open;
+  toggleSide.setAttribute('aria-pressed', String(open));
+}
+
+toggleSide.addEventListener('click', () => setSideOpen(side.hidden));
+side.addEventListener('agent-close', () => setSideOpen(false));
 
 function showLogin() {
   appView.hidden = true;
@@ -136,30 +158,32 @@ async function signIn(auth) {
     // token never travels in a URL.
     getToken: () => token,
   });
-  const controller = new ChatController({
-    client,
-    editor,
-    storageKey: {
-      appUrl: location.origin,
-      mount: '/',
-      authCollectionId,
-      userId: record.id,
-    },
-  });
+  // The account key scopes state, and names the list-sync channel.
+  const storageKey = {
+    appUrl: location.origin,
+    mount: '/',
+    authCollectionId,
+    userId: record.id,
+  };
+  const controller = new ChatController({ client, editor, storageKey });
   // The binding registers the proposal/notice renderers and mirrors the
   // server's attachment limits onto the composer.
   const binding = bindAgentPanel(page, controller, { client });
-  session = { client, controller, binding };
+  // The side panel: same account and client, its own controller and view.
+  // No editor adapter here: approving an edit_note proposal is the page's job.
+  const sideController = new ChatController({ client, storageKey });
+  const sideBinding = bindAgentPanel(side, sideController, { client });
+  session = { client, controller, binding, sideController, sideBinding };
 
   who.textContent = record.email || record.id || 'demo user';
   loginView.hidden = true;
   appView.hidden = false;
 
-  await controller.init();
+  await Promise.all([controller.init(), sideController.init()]);
   // Open the most recent conversation when the account already has one. With
   // none, the first message creates one (bindAgentPanel's autoCreate).
   const [first] = controller.state.conversations;
-  if (first) await controller.open(first.id);
+  if (first) await Promise.all([controller.open(first.id), sideController.open(first.id)]);
 }
 
 async function signOut() {
@@ -170,8 +194,10 @@ async function signOut() {
     // Stop writing to the element first, then drop the account (which aborts
     // requests, streams and polling and clears controller state), then dispose.
     current.binding.unbind();
-    await current.controller.setAccount(null);
+    current.sideBinding.unbind();
+    await Promise.all([current.controller.setAccount(null), current.sideController.setAccount(null)]);
     current.controller.dispose();
+    current.sideController.dispose();
   }
   showLogin();
 }

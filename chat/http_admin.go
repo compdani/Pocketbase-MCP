@@ -13,6 +13,19 @@ import (
 type providerListView struct {
 	Items         []ProviderView `json:"items"`
 	DefaultChoice string         `json:"defaultChoice,omitempty"`
+	// TitleChoice is "auto", "off" or a choice id; absent when the admin
+	// does not manage a title model.
+	TitleChoice string `json:"titleChoice,omitempty"`
+}
+
+type setTitleRequest struct {
+	Mode     string `json:"mode"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+type titleChoiceView struct {
+	TitleChoice string `json:"titleChoice"`
 }
 
 type providerView struct {
@@ -101,7 +114,42 @@ func (h *handler) listProviders(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []ProviderView{}
 	}
-	h.writeJSON(w, http.StatusOK, providerListView{Items: items, DefaultChoice: defaultChoice})
+	view := providerListView{Items: items, DefaultChoice: defaultChoice}
+	if titles, ok := h.cfg.ProviderAdmin.(TitleAdmin); ok {
+		choice, err := titles.TitleChoice(r.Context())
+		if err != nil {
+			h.adminFailure(w, err)
+			return
+		}
+		view.TitleChoice = choice
+	}
+	h.writeJSON(w, http.StatusOK, view)
+}
+
+func (h *handler) setTitleChoice(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.adminCaller(w, r); !ok {
+		return
+	}
+	titles, ok := h.cfg.ProviderAdmin.(TitleAdmin)
+	if !ok {
+		h.notFound(w, r)
+		return
+	}
+	var req setTitleRequest
+	if !h.decodeBody(w, r, false, &req) {
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if err := titles.SetTitleChoice(r.Context(), mode, strings.TrimSpace(req.Provider), strings.TrimSpace(req.Model)); err != nil {
+		h.adminFailure(w, err)
+		return
+	}
+	choice, err := titles.TitleChoice(r.Context())
+	if err != nil {
+		h.adminFailure(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, titleChoiceView{TitleChoice: choice})
 }
 
 func (h *handler) createProvider(w http.ResponseWriter, r *http.Request) {

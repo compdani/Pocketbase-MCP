@@ -465,6 +465,7 @@ func (h *handler) routes() *http.ServeMux {
 			// Two-segment action paths never collide with /providers/{id}.
 			route{http.MethodPost, p + "/providers/actions/test", h.testProviderConfig},
 			route{http.MethodPost, p + "/providers/actions/default", h.setDefaultProvider},
+			route{http.MethodPost, p + "/providers/actions/title", h.setTitleChoice},
 			route{http.MethodGet, p + "/providers/{id}", h.getProvider},
 			route{http.MethodPatch, p + "/providers/{id}", h.updateProvider},
 			route{http.MethodDelete, p + "/providers/{id}", h.deleteProvider},

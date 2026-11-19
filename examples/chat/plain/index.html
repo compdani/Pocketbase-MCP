@@ -33,7 +33,10 @@
   <main id="app" hidden>
     <header class="topbar">
       <span class="muted">Signed in as <strong id="who"></strong></span>
-      <button type="button" id="logout">Log out</button>
+      <span class="topbar-actions">
+        <button type="button" id="toggle-side" aria-pressed="false">Side panel</button>
+        <button type="button" id="logout">Log out</button>
+      </span>
     </header>
     <div id="workspace">
       <aside id="note" class="note" aria-labelledby="note-title">
@@ -50,6 +53,11 @@
         </p>
       </aside>
       <agent-page id="page"></agent-page>
+      <!-- A second view of the same account, as an app's side panel would be:
+           its own controller, the conversation switcher, kept in step with the
+           page through the controllers' list sync. -->
+      <agent-panel id="side" class="side" heading="Assistant" conversations-menu closable hidden
+                   placeholder="Ask anything…" empty-title="How can I help?"></agent-panel>
     </div>
   </main>
 

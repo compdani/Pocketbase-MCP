@@ -47,13 +47,3 @@ body { background: #f6f7f9; color: #1c2126; }
 }
 .topbar button:disabled { opacity: 0.6; cursor: progress; }
 agent-page { display: block; height: 100%; min-height: 0; }
-.load-more {
-  font: inherit;
-  font-size: 12px;
-  margin: 6px 10px;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: #fff;
-  cursor: pointer;
-}

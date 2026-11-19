@@ -18,17 +18,10 @@
 
   let page;
   let loggingOut = $state(false);
-  // Only used to show/hide our own "Load more" button; transcript state is the
-  // binding's business, not Svelte's.
-  let canLoadMore = $state(false);
 
   let client = null;
   let controller = null;
   let binding = null;
-
-  function onControllerChange() {
-    canLoadMore = Boolean(controller?.state.nextCursor);
-  }
 
   onMount(async () => {
     // The page owns the title UI; bindAgentPanel syncs the heading attribute.
@@ -44,8 +37,11 @@
     // The binding registers the proposal/notice renderers, mirrors the server's
     // attachment limits onto the composer, and downloads attachment chips
     // through the client passed here.
+    // It also keeps the sidebar in step: rows, the active one, and "Load
+    // more" (agent-panel's has-more) while the server has another page. The
+    // controller re-reads the list after each turn, on focus, and when
+    // another tab or element for this account changes it.
     binding = bindAgentPanel(page, controller, { client });
-    controller.addEventListener('change', onControllerChange);
 
     // Login: setAccount derives the account key, aborts anything the previous
     // account owned, clears state and loads /status plus the first page of
@@ -56,7 +52,6 @@
       authCollectionId: account.authCollectionId,
       userId: account.userId,
     });
-    onControllerChange();
 
     // Open the most recent conversation when the account already has one. With
     // none, the first message creates one (bindAgentPanel's autoCreate).
@@ -66,20 +61,12 @@
 
   onDestroy(() => {
     // unbind() is idempotent, so calling it twice (logout, then unmount) is fine.
-    controller?.removeEventListener('change', onControllerChange);
     binding?.unbind();
     controller?.dispose();
     controller = null;
     binding = null;
     client = null;
   });
-
-  function loadMore() {
-    // The binding's handle, for a host-drawn load-more control: agent-panel
-    // 0.3.x has no built-in one, so this button lives in the page's
-    // sidebar-end slot.
-    void binding?.loadMore();
-  }
 
   async function logout() {
     loggingOut = true;
@@ -109,11 +96,5 @@
     placeholder="Ask anything…"
     empty-title="How can I help?"
     empty-text="Send a message. The offline demo provider answers it."
-  >
-    {#if canLoadMore}
-      <button slot="sidebar-end" type="button" class="load-more" onclick={loadMore}>
-        Load more
-      </button>
-    {/if}
-  </agent-page>
+  ></agent-page>
 </main>

@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "agent-panel": "github:compdani/agent-panel#v0.3.1",
+    "agent-panel": "github:compdani/agent-panel#v0.4.0",
     "vue": "3.5.44"
   },
   "devDependencies": {

@@ -132,6 +132,10 @@ type RunnerConfig struct {
 	// Provider errors are already sanitized (credentials removed, length
 	// bounded). Nil means slog.Default().
 	Logger *slog.Logger
+	// Titles turns on automatic conversation titles (see TitleConfig). Nil
+	// leaves conversations untitled until a user renames them. When its Model
+	// is nil and Router implements TitleRouter, the router picks the model.
+	Titles *TitleConfig
 }
 
 // Runner executes turns against a provider and a tool executor.
@@ -152,6 +156,12 @@ type Runner struct {
 	broker *broker
 	// publishLocks order each turn's event appends with their publishes.
 	publishLocks [64]sync.Mutex
+
+	// titles tracks title requests, which outlive their turns; titleCtx is
+	// cancelled on shutdown.
+	titles      sync.WaitGroup
+	titleCtx    context.Context
+	titleCancel context.CancelFunc
 
 	mu             sync.Mutex
 	jobs           map[string]*turnJob
@@ -194,6 +204,8 @@ type turnJob struct {
 	tools          ToolExecutor
 	deadline       time.Time
 	done           chan struct{}
+	// title is closed when this turn's title attempt ends; nil when none runs.
+	title chan struct{}
 
 	state     jobState
 	stop      string
@@ -237,10 +249,20 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if nowFn == nil {
 		nowFn = time.Now
 	}
+	if cfg.Titles.enabled() && cfg.Titles.Model == nil {
+		if titleRouter, ok := cfg.Router.(TitleRouter); ok {
+			titles := *cfg.Titles
+			titles.Model = titleRouter.TitleModel
+			cfg.Titles = &titles
+		}
+	}
+	titleCtx, titleCancel := context.WithCancel(context.Background())
 	return &Runner{
 		cfg:            cfg,
 		now:            nowFn,
 		broker:         newBroker(),
+		titleCtx:       titleCtx,
+		titleCancel:    titleCancel,
 		jobs:           make(map[string]*turnJob),
 		runningPerUser: make(map[string]int),
 	}, nil
@@ -436,6 +458,8 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 		r.releaseFailedSubmit(owner, conversationID, turn.ID)
 		return turn, true, err
 	}
+	// An untitled conversation is titled from this message, alongside the turn.
+	title := r.startTitle(owner, conversationID, opts.Text, opts.Attachments, resolved)
 
 	j := &turnJob{
 		key:            turnKey(owner, turn.ID),
@@ -449,6 +473,7 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 		tools:          opts.Tools,
 		deadline:       opts.Deadline,
 		done:           make(chan struct{}),
+		title:          title,
 	}
 
 	r.mu.Lock()
@@ -600,6 +625,7 @@ func (r *Runner) Shutdown(ctx context.Context) error {
 	}
 	r.queue = nil
 	r.mu.Unlock()
+	r.titleCancel()
 
 	for _, j := range pending {
 		r.finishJob(j, TurnStateQueued, TurnStateInterrupted, FailureInterrupted)
@@ -616,6 +642,7 @@ func (r *Runner) Shutdown(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		r.wg.Wait()
+		r.titles.Wait()
 		close(done)
 	}()
 	select {
@@ -812,6 +839,9 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 			}
 		}
 		if len(calls) == 0 {
+			// Let a title that is almost ready land first, so the client's
+			// post-turn refresh already shows it.
+			r.waitTitle(j)
 			r.finishJob(j, TurnStateRunning, TurnStateCompleted, "")
 			return
 		}

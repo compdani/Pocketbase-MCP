@@ -32,6 +32,11 @@ type RouterOptions struct {
 	HTTPClient *http.Client
 	Logger     *slog.Logger
 	Now        func() time.Time
+	// TitleChoice is the title model when none is stored (the admin setting
+	// wins): "" or chat.TitleChoiceOff (no titles, the default),
+	// chat.TitleChoiceAuto (the turn's own model), a choice id
+	// ("provider::model"), or a model id.
+	TitleChoice string
 }
 
 // Router is an immutable snapshot of built providers, swapped atomically on
@@ -55,6 +60,44 @@ type snapshot struct {
 	byID      map[string]*builtProvider
 	errs      map[string]string
 	defaultID string
+	// title is the configured title choice: chat.TitleChoiceAuto,
+	// chat.TitleChoiceOff, or a provider/model pair.
+	title titleSetting
+}
+
+// titleSetting is the stored "titleChoice" setting.
+type titleSetting struct {
+	Mode     string `json:"mode,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+}
+
+// parseTitleChoice reads the RouterOptions.TitleChoice string form.
+func parseTitleChoice(raw string) titleSetting {
+	raw = strings.TrimSpace(raw)
+	switch strings.ToLower(raw) {
+	case "", chat.TitleChoiceOff:
+		return titleSetting{Mode: chat.TitleChoiceOff}
+	case chat.TitleChoiceAuto:
+		return titleSetting{Mode: chat.TitleChoiceAuto}
+	}
+	if providerID, model, ok := chat.SplitChoiceID(raw); ok {
+		return titleSetting{Provider: providerID, Model: model}
+	}
+	return titleSetting{Model: raw}
+}
+
+// String is the public form: auto, off, or the choice id.
+func (t titleSetting) String() string {
+	switch {
+	case t.Mode == chat.TitleChoiceOff:
+		return chat.TitleChoiceOff
+	case t.Model == "":
+		return chat.TitleChoiceAuto
+	case t.Provider == "":
+		return t.Model
+	}
+	return chat.ChoiceID(t.Provider, t.Model)
 }
 
 type builtProvider struct {
@@ -124,6 +167,16 @@ func (r *Router) Reload(ctx context.Context) error {
 	}{}
 	if r.opts.Store != nil {
 		_ = r.opts.Store.LoadSetting(ctx, r.opts.Scope, "defaultChoice", &defaultSetting)
+	}
+	title := parseTitleChoice(r.opts.TitleChoice)
+	if r.opts.Store != nil {
+		var stored titleSetting
+		if err := r.opts.Store.LoadSetting(ctx, r.opts.Scope, titleSettingKey, &stored); err == nil {
+			title = stored
+			if title.Mode == "" && title.Model == "" {
+				title.Mode = chat.TitleChoiceOff
+			}
+		}
 	}
 
 	byID := make(map[string]*builtProvider, len(providers))
@@ -199,7 +252,7 @@ func (r *Router) Reload(ctx context.Context) error {
 		choices[i].Default = choices[i].ID == defaultID
 	}
 
-	snap := &snapshot{choices: choices, byID: byID, errs: errs, defaultID: defaultID}
+	snap := &snapshot{choices: choices, byID: byID, errs: errs, defaultID: defaultID, title: title}
 
 	r.mu.Lock()
 	r.snap = snap
@@ -402,6 +455,46 @@ func (r *Router) defaultResolved(snap *snapshot) (chat.ResolvedModel, error) {
 		return chat.ResolvedModel{Choice: choice, Provider: built.impl, Model: choice.Model}, nil
 	}
 	return chat.ResolvedModel{}, chat.ErrNoModelConfigured
+}
+
+// titleSettingKey is the provider-store setting holding the title model.
+const titleSettingKey = "titleChoice"
+
+// TitleChoice reports the configured title model: chat.TitleChoiceAuto,
+// chat.TitleChoiceOff, or a choice id.
+func (r *Router) TitleChoice() string {
+	r.mu.RLock()
+	snap := r.snap
+	r.mu.RUnlock()
+	if snap == nil {
+		return chat.TitleChoiceOff
+	}
+	return snap.title.String()
+}
+
+// TitleModel implements chat.TitleRouter. A configured model that is not
+// available (disabled, signed out, removed) falls back to the turn's model,
+// so titles keep working; "off" turns them off.
+func (r *Router) TitleModel(ctx context.Context, turn chat.ResolvedModel) (chat.ResolvedModel, bool) {
+	r.mu.RLock()
+	snap := r.snap
+	r.mu.RUnlock()
+	if snap == nil {
+		return chat.ResolvedModel{}, false
+	}
+	switch {
+	case snap.title.Mode == chat.TitleChoiceOff:
+		return chat.ResolvedModel{}, false
+	case snap.title.Model == "":
+		return turn, true
+	}
+	resolved, err := r.Resolve(ctx, snap.title.Provider, snap.title.Model)
+	if err != nil {
+		r.opts.Logger.Warn("MCP chat: the title model is not available; using the turn's model",
+			"title", snap.title.String(), "error", err.Error())
+		return turn, true
+	}
+	return resolved, true
 }
 
 func choiceFor(built *builtProvider, model string) (chat.ModelChoice, bool) {

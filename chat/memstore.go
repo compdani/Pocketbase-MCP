@@ -476,6 +476,8 @@ func (s *MemStore) CreateTurn(_ context.Context, owner OwnerKey, t Turn) (Turn, 
 	rec := &turnRecord{turn: cloneTurn(t)}
 	s.turns[t.ID] = rec
 	conv.turnIDs = append(conv.turnIDs, t.ID)
+	// A new turn is conversation activity: the list's "updated" time follows it.
+	conv.conversation.UpdatedAt = t.CreatedAt
 	return cloneTurn(t), true, nil
 }
 

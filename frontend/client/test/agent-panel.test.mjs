@@ -12,6 +12,7 @@ import {
   effortOptionFromState,
   entriesFromState,
   errorText,
+  hasConversationList,
   isPageElement,
   modelsFromState,
   proposalEntriesFromState,
@@ -978,4 +979,69 @@ test('the binding shows the effort menu only for models with efforts and sends t
   });
   await tick();
   assert.deepEqual(controller.calls.at(-1), { method: 'send', text: 'Plain', options: { model: 'a::plain' } });
+});
+
+class FakeSwitcherPanel extends FakeElement {
+  constructor() {
+    super();
+    this.tagName = 'AGENT-PANEL';
+    this.conversations = [];
+    this.active = '';
+    this.hasMore = false;
+  }
+
+  openConversations() {}
+
+  closeConversations() {}
+}
+
+test('agent-panel 0.4 gets the conversation list but keeps its own heading', async () => {
+  const controller = makeController(stateOf({
+    activeConversationId: 'c2',
+    nextCursor: 'p2',
+    conversations: [
+      { id: 'c1', title: 'One', updatedAt: 'x' },
+      { id: 'c2', title: 'Two', updatedAt: 'y' },
+    ],
+  }));
+  const panel = new FakeSwitcherPanel();
+  panel.setAttribute('heading', 'Assistant');
+  assert.equal(isPageElement(panel), false);
+  assert.equal(hasConversationList(panel), true);
+  bindAgentPanel(panel, controller);
+
+  assert.deepEqual(panel.conversations.map((c) => c.id), ['c1', 'c2']);
+  assert.equal(panel.active, 'c2');
+  assert.equal(panel.hasMore, true);
+  assert.equal(panel.getAttribute('heading'), 'Assistant', 'the panel heading is the host\'s');
+
+  const selected = panel.fire('agent-select-conversation', { id: 'c1', conversation: { id: 'c1' } });
+  assert.equal(selected.defaultPrevented, true);
+  panel.fire('agent-delete-conversation', { id: 'c2', conversation: { id: 'c2' } });
+  panel.fire('agent-load-more', null);
+  panel.fire('agent-rename', { title: 'Ignored' });
+  await tick();
+  assert.deepEqual(controller.calls.map((c) => c.method), ['open', 'remove', 'loadMore']);
+
+  controller.set({ nextCursor: '' });
+  assert.equal(panel.hasMore, false);
+});
+
+test('New chat starts a draft when the controller supports it', async () => {
+  const controller = makeController(stateOf({ activeConversationId: 'c1' }));
+  controller.startDraft = () => {
+    controller.calls.push({ method: 'startDraft' });
+  };
+  const panel = new FakeSwitcherPanel();
+  bindAgentPanel(panel, controller);
+  panel.fire('agent-new-conversation', null);
+  assert.deepEqual(controller.calls, [{ method: 'startDraft' }]);
+
+  const eager = makeController(stateOf({ activeConversationId: 'c1' }));
+  eager.startDraft = () => eager.calls.push({ method: 'startDraft' });
+  const other = new FakeSwitcherPanel();
+  bindAgentPanel(other, eager, { autoCreate: false });
+  other.fire('agent-new-conversation', null);
+  await tick();
+  assert.deepEqual(eager.calls, [{ method: 'newConversation', title: undefined }]);
 });

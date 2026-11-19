@@ -20,6 +20,7 @@ import (
 
 	pbmcp "github.com/compdani/pocketbase-mcp"
 	pb "github.com/compdani/pocketbase-mcp/adapters/pocketbase"
+	"github.com/compdani/pocketbase-mcp/chat"
 	"github.com/compdani/pocketbase-mcp/chat/provider"
 	"github.com/compdani/pocketbase-mcp/chat/provider/anthropic"
 	"github.com/compdani/pocketbase-mcp/chat/provider/catalog"
@@ -176,6 +177,11 @@ func main() {
 //	MCP_CHAT_UPLOADS        true turns chat attachments on (upload, download
 //	                        and attachment turns)
 //	MCP_CHAT_MAX_UPLOAD_BYTES  optional per-file byte limit for attachments
+//	MCP_CHAT_TITLE_MODEL    titles new conversations from their first message:
+//	                        auto (the turn's model), a model or a
+//	                        "provider::model" choice, or off (the default); in
+//	                        managed mode the admin setting
+//	                        (POST /providers/actions/title) wins
 //
 // With MCP_CHAT_PROVIDER=demo the canned replies also demonstrate v1.2: a
 // message containing "create" asks for the first create tool the caller can
@@ -234,6 +240,7 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 			}
 		}
 		if err := srv.EnableChat(pb.ChatConfig{
+			TitleModel:      os.Getenv("MCP_CHAT_TITLE_MODEL"),
 			Options:         opts,
 			ManageProviders: true,
 			Providers:       providers,
@@ -284,10 +291,11 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 	}
 
 	if err := srv.EnableChat(pb.ChatConfig{
-		Options:  opts,
-		Provider: prov,
-		Model:    model,
-		System:   system,
+		TitleModel: os.Getenv("MCP_CHAT_TITLE_MODEL"),
+		Options:    opts,
+		Provider:   prov,
+		Model:      model,
+		System:     system,
 	}); err != nil {
 		return fmt.Errorf("enable chat: %w", err)
 	}
@@ -459,6 +467,9 @@ func demoChunks(req provider.Request) []provider.Chunk {
 	if n := len(req.Messages); n > 0 {
 		last = req.Messages[n-1]
 	}
+	if req.System == chat.TitleSystemPrompt {
+		return demoTextChunks(demoConversationTitle(last.Text))
+	}
 	lower := strings.ToLower(last.Text)
 	switch {
 	case last.Role == provider.RoleTool:
@@ -492,6 +503,20 @@ func demoChunks(req provider.Request) []provider.Chunk {
 	default:
 		return demoTextChunks("Hello from the offline demo provider. This reply is canned: MCP_CHAT_PROVIDER=demo is for local development only.")
 	}
+}
+
+// demoConversationTitle titles a conversation from the first words of its message, as a
+// real model would summarise it.
+func demoConversationTitle(text string) string {
+	words := strings.Fields(text)
+	if len(words) > 5 {
+		words = words[:5]
+	}
+	if len(words) == 0 {
+		return "Demo chat"
+	}
+	title := strings.Join(words, " ")
+	return strings.ToUpper(title[:1]) + title[1:]
 }
 
 // demoAttachmentReply names every attachment and counts the characters of the
