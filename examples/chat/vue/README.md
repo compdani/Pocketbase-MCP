@@ -27,16 +27,18 @@ npm run build   # production build
 `PB_URL` and `AGENT_PANEL_DIR` work as in the
 [chat examples README](../README.md#2-start-an-example).
 
-## How the local packages are found
+## How the packages are found
 
-Neither package comes from npm. `vite.config.js` maps imports to folders on
-disk:
+`agent-panel` is a dependency installed by `npm install` from
+[github.com/compdani/agent-panel](https://github.com/compdani/agent-panel),
+pinned to `v0.3.1` in `package.json`. The chat client is this repo's own
+code, which `vite.config.js` maps to folders on disk:
 
 | Import | Resolves to |
 |---|---|
 | `@chat-client` | `frontend/client/index.mjs` |
 | `@chat-client/agent-panel` | `frontend/client/agent-panel.mjs` |
-| `agent-panel/page` | `$AGENT_PANEL_DIR/page.js` (defines `<agent-page>`) |
+| `agent-panel/page` | `node_modules/agent-panel/page.js` (defines `<agent-page>`), or `$AGENT_PANEL_DIR/page.js` when set |
 
 `server.fs.allow` lists those folders, because Vite won't serve files outside
 the project otherwise.
@@ -60,15 +62,15 @@ The same `ChatPage.vue` works in Nuxt with three changes:
 
 1. **Render it in the browser only:** wrap the chat screen in `<ClientOnly>`
    (or set `ssr: false`). Keep the sign-in form outside it.
-2. **Config:** set the custom-element rule, the `/api` proxy and the local
-   package aliases in `nuxt.config.ts`:
+2. **Config:** add `"agent-panel": "github:compdani/agent-panel#v0.3.1"` to
+   the app's dependencies, then set the custom-element rule, the `/api` proxy
+   and the chat-client aliases in `nuxt.config.ts`:
 
    ```ts
    import { fileURLToPath } from 'node:url';
 
    const appDir = fileURLToPath(new URL('.', import.meta.url));
    const clientDir = fileURLToPath(new URL('../../../frontend/client', import.meta.url));
-   const agentPanelDir = process.env.AGENT_PANEL_DIR ?? '/Volumes/mini512/Components/agent-panel';
    const pbUrl = process.env.PB_URL ?? 'http://127.0.0.1:8090';
 
    export default defineNuxtConfig({
@@ -79,10 +81,9 @@ The same `ChatPage.vue` works in Nuxt with three changes:
          alias: [
            { find: /^@chat-client\/agent-panel$/, replacement: `${clientDir}/agent-panel.mjs` },
            { find: /^@chat-client$/, replacement: `${clientDir}/index.mjs` },
-           { find: /^agent-panel\/page$/, replacement: `${agentPanelDir}/page.js` },
          ],
        },
-       server: { fs: { allow: [appDir, clientDir, agentPanelDir] } },
+       server: { fs: { allow: [appDir, clientDir] } },
      },
    });
    ```
