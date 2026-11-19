@@ -17,6 +17,7 @@ import (
 
 	pbmcp "github.com/compdani/pocketbase-mcp"
 	pb "github.com/compdani/pocketbase-mcp/adapters/pbpostgress"
+	"github.com/compdani/pocketbase-mcp/chat"
 	"github.com/compdani/pocketbase-mcp/chat/provider"
 	"github.com/compdani/pocketbase-mcp/chat/provider/anthropic"
 	"github.com/compdani/pocketbase-mcp/chat/provider/catalog"
@@ -172,6 +173,14 @@ func main() {
 //	                        "provider::model" choice, or off (the default); in
 //	                        managed mode the admin setting
 //	                        (POST /providers/actions/title) wins
+//	MCP_CHAT_COMPACT_MODEL  summarizes a conversation's oldest messages when it
+//	                        nears its model's context window, and lets users
+//	                        compact a conversation at once: auto (the turn's
+//	                        model), a model or "provider::model" choice, or off
+//	                        (the default)
+//	MCP_CHAT_CONTEXT_WINDOW the context window in tokens of a model the module
+//	                        doesn't know (a gateway's or a local model's);
+//	                        known Claude and OpenAI models need none
 //
 // It must run before RegisterRoutes, which mounts the chat handler when chat is
 // enabled. The chat collections live in the shared database and are scoped to
@@ -202,6 +211,10 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 		return fmt.Errorf("MCP_CHAT_AUTO_APPROVE and MCP_CHAT_ARG_EDITS require MCP_CHAT_PROPOSALS=true")
 	}
 	system := os.Getenv("MCP_CHAT_SYSTEM")
+	contextWindow, err := chatContextWindow()
+	if err != nil {
+		return err
+	}
 	opts := pbmcp.ChatOptions{
 		Namespace:          "example-fork",
 		Prefix:             pbmcp.DefaultChatPrefix,
@@ -227,6 +240,8 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 		}
 		if err := srv.EnableChat(pb.ChatConfig{
 			TitleModel:      os.Getenv("MCP_CHAT_TITLE_MODEL"),
+			CompactionModel: os.Getenv("MCP_CHAT_COMPACT_MODEL"),
+			RunnerConfig:    chat.RunnerConfig{ContextWindow: contextWindow},
 			Options:         opts,
 			ManageProviders: true,
 			Providers:       providers,
@@ -270,11 +285,13 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 	}
 
 	if err := srv.EnableChat(pb.ChatConfig{
-		TitleModel: os.Getenv("MCP_CHAT_TITLE_MODEL"),
-		Options:    opts,
-		Provider:   prov,
-		Model:      model,
-		System:     system,
+		TitleModel:      os.Getenv("MCP_CHAT_TITLE_MODEL"),
+		CompactionModel: os.Getenv("MCP_CHAT_COMPACT_MODEL"),
+		RunnerConfig:    chat.RunnerConfig{ContextWindow: contextWindow},
+		Options:         opts,
+		Provider:        prov,
+		Model:           model,
+		System:          system,
 	}); err != nil {
 		return fmt.Errorf("enable chat: %w", err)
 	}
@@ -359,6 +376,19 @@ func loadChatProviders(path string) ([]catalog.Provider, error) {
 
 // chatMaxUploadBytes reads the optional MCP_CHAT_MAX_UPLOAD_BYTES limit. An
 // unset or zero value leaves the chat default in place.
+// chatContextWindow reads MCP_CHAT_CONTEXT_WINDOW.
+func chatContextWindow() (int, error) {
+	raw := strings.TrimSpace(os.Getenv("MCP_CHAT_CONTEXT_WINDOW"))
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 2000 {
+		return 0, fmt.Errorf("MCP_CHAT_CONTEXT_WINDOW must be a token count of at least 2000")
+	}
+	return n, nil
+}
+
 func chatMaxUploadBytes() (int64, error) {
 	raw := strings.TrimSpace(os.Getenv("MCP_CHAT_MAX_UPLOAD_BYTES"))
 	if raw == "" {

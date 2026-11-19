@@ -379,8 +379,8 @@ func (p *Provider) consumeResponses(ctx context.Context, body io.Reader, ch chan
 			if event.Response != nil && event.Response.Error != nil {
 				message, code = event.Response.Error.Message, event.Response.Error.Code
 			}
-			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf(
-				"openai: %s", truncate(strings.TrimSpace(code+" "+message)))})
+			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: responsesFailure(
+				"openai: "+truncate(strings.TrimSpace(code+" "+message)), code, message)})
 			return
 		case "response.incomplete":
 			reason := "unknown"
@@ -391,13 +391,28 @@ func (p *Provider) consumeResponses(ctx context.Context, body io.Reader, ch chan
 				"openai: response incomplete: %s", truncate(reason))})
 			return
 		case "error":
-			message := event.Message
+			message, code := event.Message, ""
 			if event.Error != nil {
+				code = event.Error.Code
 				message = strings.TrimSpace(event.Error.Code + " " + event.Error.Message)
 			}
-			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf(
-				"openai: stream error: %s", truncate(message))})
+			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: responsesFailure(
+				"openai: stream error: "+truncate(message), code, message)})
 			return
 		}
 	}
+}
+
+// streamedError is a failure the Responses stream reported in an event rather
+// than an HTTP status. It keeps the code so a context overflow is recognized.
+type streamedError struct {
+	text     string
+	overflow bool
+}
+
+func (e *streamedError) Error() string         { return e.text }
+func (e *streamedError) ContextOverflow() bool { return e.overflow }
+
+func responsesFailure(text, code, message string) error {
+	return &streamedError{text: text, overflow: provider.LooksLikeContextOverflow(code, message)}
 }

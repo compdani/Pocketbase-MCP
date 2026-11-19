@@ -752,3 +752,37 @@ func TestReasoningEffortRefused(t *testing.T) {
 		t.Fatalf("err = %v, want ErrUnsupported", err)
 	}
 }
+
+func TestContextOverflowIsRecognized(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		body     string
+		overflow bool
+	}{
+		{"prompt too long", http.StatusBadRequest, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1048577 tokens > 1000000 maximum"}}`, true},
+		{"other bad request", http.StatusBadRequest, `{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: must be positive"}}`, false},
+		{"rate limit", http.StatusTooManyRequests, `{"type":"error","error":{"type":"rate_limit_error","message":"prompt is too long for your rate limit"}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			p := newProvider(t, srv.URL)
+			ch, err := p.Stream(context.Background(), provider.Request{Model: "m"})
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			got := collect(t, ch)
+			if len(got) != 1 || got[0].Kind != provider.ChunkError {
+				t.Fatalf("chunks = %+v", got)
+			}
+			if provider.IsContextOverflow(got[0].Err) != tc.overflow {
+				t.Fatalf("IsContextOverflow(%v) = %v, want %v", got[0].Err, !tc.overflow, tc.overflow)
+			}
+		})
+	}
+}

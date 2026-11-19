@@ -99,6 +99,66 @@ func Run(t *testing.T, newStore func(t *testing.T) chat.Store) {
 	t.Run("CreateTurnTouchesConversation", func(t *testing.T) {
 		testCreateTurnTouchesConversation(t, newStore(t))
 	})
+	t.Run("Summaries", func(t *testing.T) {
+		testSummaries(t, newStore(t))
+	})
+}
+
+// testSummaries checks the optional SummaryStore: the latest summary only, a
+// conditional write, owner isolation, no effect on the conversation itself,
+// and deletion with the conversation. A store without it is skipped.
+func testSummaries(t *testing.T, s chat.Store) {
+	sums, ok := s.(chat.SummaryStore)
+	if !ok {
+		t.Skip("store does not implement chat.SummaryStore")
+	}
+	owner := ownerKey()
+	c := mustCreateConversation(t, s, owner, "long chat")
+	if _, found, err := sums.LatestSummary(ctx(), owner, c.ID); err != nil || found {
+		t.Fatalf("new conversation: found=%v err=%v", found, err)
+	}
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	first := chat.Summary{ConversationID: c.ID, ThroughMessageID: "m1", Text: "The user wants a quote.", Provider: "p", Model: "m", CreatedAt: at}
+	if stored, err := sums.PutSummary(ctx(), owner, first, ""); err != nil || !stored {
+		t.Fatalf("first summary: stored=%v err=%v", stored, err)
+	}
+	// A writer that read no summary loses to the one that stored first.
+	if stored, err := sums.PutSummary(ctx(), owner, chat.Summary{ConversationID: c.ID, ThroughMessageID: "m2", Text: "late", CreatedAt: at}, ""); err != nil || stored {
+		t.Fatalf("stale write: stored=%v err=%v, want not stored", stored, err)
+	}
+	second := chat.Summary{ConversationID: c.ID, ThroughMessageID: "m5", Text: "The user wants a quote for 3 items.", CreatedAt: at.Add(time.Minute)}
+	if stored, err := sums.PutSummary(ctx(), owner, second, "m1"); err != nil || !stored {
+		t.Fatalf("second summary: stored=%v err=%v", stored, err)
+	}
+	got, found, err := sums.LatestSummary(ctx(), owner, c.ID)
+	if err != nil || !found {
+		t.Fatalf("LatestSummary: found=%v err=%v", found, err)
+	}
+	if got.ThroughMessageID != "m5" || got.Text != second.Text || got.ConversationID != c.ID || !got.CreatedAt.Equal(second.CreatedAt) {
+		t.Fatalf("latest summary = %+v, want %+v", got, second)
+	}
+
+	if _, _, err := sums.LatestSummary(ctx(), otherOwner(), c.ID); !errors.Is(err, chat.ErrNotFound) {
+		t.Fatalf("other owner read: err=%v, want ErrNotFound", err)
+	}
+	if _, err := sums.PutSummary(ctx(), otherOwner(), chat.Summary{ConversationID: c.ID, ThroughMessageID: "x", Text: "x"}, "m5"); !errors.Is(err, chat.ErrNotFound) {
+		t.Fatalf("other owner write: err=%v, want ErrNotFound", err)
+	}
+
+	conv, err := s.GetConversation(ctx(), owner, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conv.Title != c.Title || !conv.UpdatedAt.Equal(c.UpdatedAt) {
+		t.Fatalf("a summary changed the conversation: %+v, was %+v", conv, c)
+	}
+
+	if err := s.DeleteConversation(ctx(), owner, c.ID); err != nil {
+		t.Fatalf("DeleteConversation: %v", err)
+	}
+	if _, _, err := sums.LatestSummary(ctx(), owner, c.ID); !errors.Is(err, chat.ErrNotFound) {
+		t.Fatalf("after delete: err=%v, want ErrNotFound", err)
+	}
 }
 
 // testCreateTurnTouchesConversation checks that a new turn moves the

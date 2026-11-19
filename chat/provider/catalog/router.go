@@ -37,6 +37,11 @@ type RouterOptions struct {
 	// chat.TitleChoiceAuto (the turn's own model), a choice id
 	// ("provider::model"), or a model id.
 	TitleChoice string
+	// CompactionChoice is the model that writes conversation summaries, in
+	// the same forms as TitleChoice: "" or chat.CompactionChoiceOff (off,
+	// the default), chat.CompactionChoiceAuto (the turn's own model), a
+	// choice id or a model id.
+	CompactionChoice string
 }
 
 // Router is an immutable snapshot of built providers, swapped atomically on
@@ -63,6 +68,8 @@ type snapshot struct {
 	// title is the configured title choice: chat.TitleChoiceAuto,
 	// chat.TitleChoiceOff, or a provider/model pair.
 	title titleSetting
+	// compaction is the summary model, in the same form.
+	compaction titleSetting
 }
 
 // titleSetting is the stored "titleChoice" setting.
@@ -231,6 +238,7 @@ func (r *Router) Reload(ctx context.Context) error {
 				Group:           p.Label,
 				AttachmentTypes: attachments,
 				Efforts:         m.Efforts,
+				ContextWindow:   m.Window(),
 			})
 		}
 	}
@@ -252,7 +260,8 @@ func (r *Router) Reload(ctx context.Context) error {
 		choices[i].Default = choices[i].ID == defaultID
 	}
 
-	snap := &snapshot{choices: choices, byID: byID, errs: errs, defaultID: defaultID, title: title}
+	snap := &snapshot{choices: choices, byID: byID, errs: errs, defaultID: defaultID, title: title,
+		compaction: parseTitleChoice(r.opts.CompactionChoice)}
 
 	r.mu.Lock()
 	r.snap = snap
@@ -497,6 +506,38 @@ func (r *Router) TitleModel(ctx context.Context, turn chat.ResolvedModel) (chat.
 	return resolved, true
 }
 
+// CompactionEnabled reports whether a summary model is configured.
+func (r *Router) CompactionEnabled() bool {
+	r.mu.RLock()
+	snap := r.snap
+	r.mu.RUnlock()
+	return snap != nil && snap.compaction.Mode != chat.TitleChoiceOff
+}
+
+// CompactionModel implements chat.CompactionRouter, like TitleModel: a
+// configured model that is not available falls back to the turn's model.
+func (r *Router) CompactionModel(ctx context.Context, turn chat.ResolvedModel) (chat.ResolvedModel, bool) {
+	r.mu.RLock()
+	snap := r.snap
+	r.mu.RUnlock()
+	if snap == nil {
+		return chat.ResolvedModel{}, false
+	}
+	switch {
+	case snap.compaction.Mode == chat.TitleChoiceOff:
+		return chat.ResolvedModel{}, false
+	case snap.compaction.Model == "":
+		return turn, true
+	}
+	resolved, err := r.Resolve(ctx, snap.compaction.Provider, snap.compaction.Model)
+	if err != nil {
+		r.opts.Logger.Warn("MCP chat: the summary model is not available; using the turn's model",
+			"summary", snap.compaction.String(), "error", err.Error())
+		return turn, true
+	}
+	return resolved, true
+}
+
 func choiceFor(built *builtProvider, model string) (chat.ModelChoice, bool) {
 	m, ok := built.config.Model(model)
 	if !ok {
@@ -510,6 +551,7 @@ func choiceFor(built *builtProvider, model string) (chat.ModelChoice, bool) {
 		Group:           built.config.Label,
 		AttachmentTypes: attachmentTypesFor(built.impl),
 		Efforts:         m.Efforts,
+		ContextWindow:   m.Window(),
 	}, true
 }
 

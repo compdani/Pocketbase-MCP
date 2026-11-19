@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/compdani/pocketbase-mcp/chat"
 	"github.com/compdani/pocketbase-mcp/chat/provider"
 	"github.com/compdani/pocketbase-mcp/chat/provider/codex"
 )
@@ -51,6 +52,19 @@ type Model struct {
 	// a turn naming one is refused. Discovery fills it for Codex plan models
 	// and known OpenAI reasoning models; administrators can edit it.
 	Efforts []string `json:",omitempty"`
+	// ContextWindow is the model's input window in tokens. Zero means the
+	// built-in default for known model ids (chat.DefaultContextWindow), or
+	// unknown. Set it for a gateway that serves a smaller window.
+	ContextWindow int `json:",omitempty"`
+}
+
+// Window returns the model's context window: its own, or the default for
+// its id.
+func (m Model) Window() int {
+	if m.ContextWindow > 0 {
+		return m.ContextWindow
+	}
+	return chat.DefaultContextWindow(m.ID)
 }
 
 // Provider is one catalog entry. APIKey is a runtime secret: the adapter
@@ -143,6 +157,9 @@ func (p Provider) Validate() error {
 			if !provider.ValidReasoningEffort(e) {
 				return fmt.Errorf("provider %q model %q has unknown reasoning effort %q", p.ID, m.ID, e)
 			}
+		}
+		if m.ContextWindow < 0 {
+			return fmt.Errorf("provider %q model %q has a negative context window", p.ID, m.ID)
 		}
 		if len(m.Efforts) > 0 && p.Kind == KindAnthropic {
 			return fmt.Errorf("provider %q: reasoning effort is not supported for Anthropic models", p.ID)

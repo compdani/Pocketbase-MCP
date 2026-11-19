@@ -62,6 +62,8 @@ const ERROR_TEXT = Object.freeze({
   // Failure codes the runner records on a failed turn (chat/runner.go).
   provider_error: 'The AI provider refused the request. Try again, or ask an administrator to check the provider settings.',
   max_steps: 'This question needed too many steps. Try asking something narrower.',
+  context_too_long: 'This conversation is too long for the selected model. Compact it, start a new chat, or pick a model with a larger context.',
+  too_soon: 'The conversation was summarized moments ago.',
   internal_error: 'Something went wrong on the server. Try again.',
   timeout: 'The server took too long to answer. Try again.',
   interrupted: 'The reply was interrupted. Try again.',
@@ -429,8 +431,23 @@ export function entriesFromState(state, options = {}) {
   const running = state?.running === true;
 
   const entries = [];
+  const summarizedThrough = typeof state?.context?.summarizedThrough === 'string'
+    ? state.context.summarizedThrough
+    : '';
+  let markerAt = -1;
+  if (summarizedThrough !== '') {
+    markerAt = messages.findIndex((m) => m && String(m.id) === summarizedThrough);
+    // The marker goes after the summarized message's tool results too.
+    while (markerAt >= 0 && markerAt + 1 < messages.length && messages[markerAt + 1]?.role === 'tool') markerAt += 1;
+  }
+  const pushMarker = (index) => {
+    if (index === markerAt) {
+      entries.push({ id: `context-marker:${summarizedThrough}`, type: CONTEXT_MARKER_TYPE, content: CONTEXT_MARKER_TEXT });
+    }
+  };
 
   for (let index = 0; index < messages.length; index += 1) {
+    if (index > 0) pushMarker(index - 1);
     const message = messages[index];
     if (!message || typeof message !== 'object') continue;
     const role = typeof message.role === 'string' && message.role ? message.role : 'assistant';
@@ -528,6 +545,8 @@ export function entriesFromState(state, options = {}) {
       }
     }
   }
+
+  if (messages.length > 0) pushMarker(messages.length - 1);
 
   const pending = typeof options.pendingText === 'string' ? options.pendingText.trim() : '';
   if (pending !== '' && !hasUserText(messages, pending)) {
@@ -706,8 +725,53 @@ export function registerProposalEntry(panel) {
   if (!panel || typeof panel.defineEntry !== 'function') return false;
   panel.defineEntry('proposal', renderProposalEntry);
   panel.defineEntry('notice', renderNoticeEntry);
+  panel.defineEntry(CONTEXT_MARKER_TYPE, renderContextMarkerEntry);
   return true;
 }
+
+// --- context window ----------------------------------------------------------
+
+/** The custom entry type of the "earlier messages are summarized" divider. */
+export const CONTEXT_MARKER_TYPE = 'context-marker';
+export const CONTEXT_MARKER_TEXT = 'Earlier messages are summarized for the model';
+
+/** Draw the summary marker: a thin divider with a short label. */
+export function renderContextMarkerEntry(entry) {
+  if (!hasDocument() || !entry) return null;
+  const line = makeElement('div', 'context-marker');
+  line.setAttribute('part', 'context-marker');
+  line.setAttribute('role', 'separator');
+  line.style.cssText = 'display:flex;align-items:center;gap:10px;font-size:12px;'
+    + 'color:var(--agent-muted);margin:6px 0;';
+  const rule = () => {
+    const hr = makeElement('span');
+    hr.style.cssText = 'flex:1;height:1px;background:var(--agent-border);';
+    return hr;
+  };
+  line.append(rule(), makeElement('span', '', entry.content || CONTEXT_MARKER_TEXT), rule());
+  return line;
+}
+
+/**
+ * The element's `contextUsage` (agent-panel 0.5+) from controller state, or
+ * null when the server reports no known window. Pure.
+ */
+export function contextUsageFromState(state) {
+  const context = state && state.context && typeof state.context === 'object' ? state.context : null;
+  if (!context || !(context.window > 0)) return null;
+  const usage = {
+    used: Math.max(0, Number(context.tokens) || 0),
+    window: context.window,
+    estimated: context.estimated === true,
+    compacting: context.compacting === true,
+    canCompact: context.canCompact === true,
+  };
+  if (context.summarizedAt) usage.summarizedAt = context.summarizedAt;
+  return usage;
+}
+
+/** The share of the window at which the ring (and the slot fallback) shows. */
+const CONTEXT_THRESHOLD = 0.6;
 
 // --- binding ---------------------------------------------------------------
 
@@ -878,6 +942,11 @@ function saveBlob(blob, name) {
  *   defaults to the controller's own client.
  * @param {(uploadId: string, reference: object) => unknown} [options.download]
  *   Replace the default download (which fetches and saves the Blob).
+ * @param {'auto' | 'slot' | false} [options.contextUsage='auto'] How the
+ *   context indicator is shown: 'auto' writes agent-panel 0.5's
+ *   `contextUsage` (nothing on older versions), 'slot' also draws a small
+ *   button into the `composer-actions` slot when the element has no
+ *   `contextUsage` of its own, and false shows nothing.
  * @returns {{ unbind: () => void, refresh: () => void, loadMore: () => Promise<unknown> }}
  */
 export function bindAgentPanel(element, controller, options = {}) {
@@ -890,6 +959,8 @@ export function bindAgentPanel(element, controller, options = {}) {
   const page = isPageElement(element);
   const lists = hasConversationList(element);
   const autoCreate = options.autoCreate !== false;
+  const contextMode = options.contextUsage === false ? 'off' : options.contextUsage === 'slot' ? 'slot' : 'auto';
+  let contextButton = null; // the 'slot' fallback, created on first use
   if (options.registerEntries !== false) registerProposalEntry(element);
 
   const listeners = [];
@@ -937,6 +1008,7 @@ export function bindAgentPanel(element, controller, options = {}) {
       writeProperty(element, 'error', text);
     }
 
+    writeContextUsage(snapshot);
     writeProperty(element, 'models', modelsFromState(snapshot));
     writeEffortOption(snapshot);
     writeAttachmentLimits(element, snapshot);
@@ -988,6 +1060,47 @@ export function bindAgentPanel(element, controller, options = {}) {
       paint();
       return false;
     }
+  }
+
+  function nativeContextUsage() {
+    // agent-panel 0.5 defines contextUsage on its prototype; an expando on an
+    // older element would draw nothing.
+    return 'contextUsage' in Object.getPrototypeOf(element);
+  }
+
+  function writeContextUsage(snapshot) {
+    if (contextMode === 'off') return;
+    const usage = contextUsageFromState(snapshot);
+    if (nativeContextUsage()) {
+      writeProperty(element, 'contextUsage', usage);
+      return;
+    }
+    if (contextMode !== 'slot' || !hasDocument()) return;
+    const share = usage ? usage.used / usage.window : 0;
+    const show = usage !== null && (share >= CONTEXT_THRESHOLD || usage.compacting);
+    if (!show) {
+      if (contextButton) contextButton.hidden = true;
+      return;
+    }
+    if (!contextButton) {
+      contextButton = makeElement('button', 'chat-context-usage');
+      contextButton.type = 'button';
+      contextButton.slot = 'composer-actions';
+      contextButton.style.cssText = 'font:inherit;font-size:12px;border:1px solid var(--agent-border,#ccc);'
+        + 'border-radius:999px;background:none;color:inherit;padding:2px 8px;cursor:pointer;';
+      contextButton.addEventListener('click', () => {
+        const current = contextUsageFromState(state());
+        if (current && current.canCompact && !current.compacting) void controller.compact();
+      });
+      element.append(contextButton);
+    }
+    const percent = Math.round(Math.min(1, share) * 100);
+    contextButton.hidden = false;
+    contextButton.disabled = usage.compacting || !usage.canCompact || snapshot.running === true;
+    contextButton.textContent = usage.compacting ? 'Compacting…' : `${percent}% context`;
+    contextButton.title = usage.canCompact
+      ? `${percent}% of the context window used. Click to summarize older messages.`
+      : `${percent}% of the context window used.`;
   }
 
   // The binding owns only the "effort" entry of the options menu; options a
@@ -1161,6 +1274,9 @@ export function bindAgentPanel(element, controller, options = {}) {
   listen(element, 'agent-error-dismiss', onErrorDismiss);
   listen(element, 'agent-action', onAction);
   listen(element, 'agent-reference-open', onReferenceOpen);
+  listen(element, 'agent-compact', () => {
+    if (contextMode !== 'off') void controller.compact();
+  });
 
   if (lists) {
     listen(element, 'agent-select-conversation', (event) => {
@@ -1204,6 +1320,8 @@ export function bindAgentPanel(element, controller, options = {}) {
       unbound = true;
       for (const [target, type, handler] of listeners) target.removeEventListener(type, handler);
       listeners.length = 0;
+      if (contextButton) contextButton.remove();
+      contextButton = null;
     },
     refresh: paint,
     loadMore() {

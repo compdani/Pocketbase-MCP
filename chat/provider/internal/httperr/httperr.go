@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/compdani/pocketbase-mcp/chat/provider"
 )
 
 // MaxDetail bounds the detail string carried by an Error.
@@ -83,6 +85,17 @@ func (e *Error) Error() string {
 // (5xx). It is advisory; the adapters never retry on their own.
 func (e *Error) Retryable() bool {
 	return e.StatusCode == 408 || e.StatusCode == 429 || e.StatusCode >= 500
+}
+
+// ContextOverflow reports whether the provider refused the request because its
+// input does not fit the model's context window (see
+// provider.LooksLikeContextOverflow). Only 400 and 413 qualify: a throttle or
+// server error that happens to mention tokens is not an overflow.
+func (e *Error) ContextOverflow() bool {
+	if e.StatusCode != 400 && e.StatusCode != 413 {
+		return false
+	}
+	return provider.LooksLikeContextOverflow(e.Code, e.Message+" "+e.Detail)
 }
 
 // parseBody extracts the provider's error object from a response body. Both

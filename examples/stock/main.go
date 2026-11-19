@@ -182,6 +182,16 @@ func main() {
 //	                        "provider::model" choice, or off (the default); in
 //	                        managed mode the admin setting
 //	                        (POST /providers/actions/title) wins
+//	MCP_CHAT_COMPACT_MODEL  summarizes a conversation's oldest messages when it
+//	                        nears its model's context window, and lets users
+//	                        compact a conversation at once: auto (the turn's
+//	                        model), a model or "provider::model" choice, or off
+//	                        (the default)
+//	MCP_CHAT_CONTEXT_WINDOW the context window in tokens of a model the module
+//	                        doesn't know (a gateway's, a local model's, or the
+//	                        demo's); known Claude and OpenAI models need none.
+//	                        A small value (4000) makes the demo show the
+//	                        context indicator and compaction after a few messages
 //
 // With MCP_CHAT_PROVIDER=demo the canned replies also demonstrate v1.2: a
 // message containing "create" asks for the first create tool the caller can
@@ -216,6 +226,10 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 		return fmt.Errorf("MCP_CHAT_AUTO_APPROVE and MCP_CHAT_ARG_EDITS require MCP_CHAT_PROPOSALS=true")
 	}
 	system := os.Getenv("MCP_CHAT_SYSTEM")
+	contextWindow, err := chatContextWindow()
+	if err != nil {
+		return err
+	}
 	opts := pbmcp.ChatOptions{
 		Namespace:          "example-stock",
 		Prefix:             pbmcp.DefaultChatPrefix,
@@ -241,6 +255,8 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 		}
 		if err := srv.EnableChat(pb.ChatConfig{
 			TitleModel:      os.Getenv("MCP_CHAT_TITLE_MODEL"),
+			CompactionModel: os.Getenv("MCP_CHAT_COMPACT_MODEL"),
+			RunnerConfig:    chat.RunnerConfig{ContextWindow: contextWindow},
 			Options:         opts,
 			ManageProviders: true,
 			Providers:       providers,
@@ -291,11 +307,13 @@ func enableChat(srv *pb.Server, allowWrites bool) error {
 	}
 
 	if err := srv.EnableChat(pb.ChatConfig{
-		TitleModel: os.Getenv("MCP_CHAT_TITLE_MODEL"),
-		Options:    opts,
-		Provider:   prov,
-		Model:      model,
-		System:     system,
+		TitleModel:      os.Getenv("MCP_CHAT_TITLE_MODEL"),
+		CompactionModel: os.Getenv("MCP_CHAT_COMPACT_MODEL"),
+		RunnerConfig:    chat.RunnerConfig{ContextWindow: contextWindow},
+		Options:         opts,
+		Provider:        prov,
+		Model:           model,
+		System:          system,
 	}); err != nil {
 		return fmt.Errorf("enable chat: %w", err)
 	}
@@ -384,6 +402,19 @@ func loadChatProviders(path string) ([]catalog.Provider, error) {
 
 // chatMaxUploadBytes reads the optional MCP_CHAT_MAX_UPLOAD_BYTES limit. An
 // unset or zero value leaves the chat default in place.
+// chatContextWindow reads MCP_CHAT_CONTEXT_WINDOW.
+func chatContextWindow() (int, error) {
+	raw := strings.TrimSpace(os.Getenv("MCP_CHAT_CONTEXT_WINDOW"))
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 2000 {
+		return 0, fmt.Errorf("MCP_CHAT_CONTEXT_WINDOW must be a token count of at least 2000")
+	}
+	return n, nil
+}
+
 func chatMaxUploadBytes() (int64, error) {
 	raw := strings.TrimSpace(os.Getenv("MCP_CHAT_MAX_UPLOAD_BYTES"))
 	if raw == "" {
@@ -413,6 +444,10 @@ func chatMaxUploadBytes() (int64, error) {
 //     with {"limit": 5} when that tool accepts a limit;
 //   - the step after a tool result summarises how many results it carried, or
 //     says that a change is waiting for approval;
+//   - a user message containing "long" gets a long reply, so a small
+//     MCP_CHAT_CONTEXT_WINDOW fills up after a few messages;
+//   - a summary request (chat.CompactionSystemPrompt) gets a summary listing
+//     the user's earlier messages;
 //   - any other message streams a short reply in a few text chunks.
 type demoProvider struct {
 	delay time.Duration
@@ -470,6 +505,9 @@ func demoChunks(req provider.Request) []provider.Chunk {
 	if req.System == chat.TitleSystemPrompt {
 		return demoTextChunks(demoConversationTitle(last.Text))
 	}
+	if req.System == chat.CompactionSystemPrompt {
+		return demoTextChunks(demoSummary(last.Text))
+	}
 	lower := strings.ToLower(last.Text)
 	switch {
 	case last.Role == provider.RoleTool:
@@ -500,9 +538,40 @@ func demoChunks(req provider.Request) []provider.Chunk {
 			}
 		}
 		return demoTextChunks("The demo provider would search here, but no search tool is available for this account.")
+	case last.Role == provider.RoleUser && strings.Contains(lower, "long"):
+		return demoTextChunks(demoLongReply())
 	default:
 		return demoTextChunks("Hello from the offline demo provider. This reply is canned: MCP_CHAT_PROVIDER=demo is for local development only.")
 	}
+}
+
+// demoLongReply is about 1,500 tokens of filler, for trying the context
+// indicator with a small MCP_CHAT_CONTEXT_WINDOW.
+func demoLongReply() string {
+	var b strings.Builder
+	b.WriteString("Here is a deliberately long demo reply, so the conversation's context fills up quickly.\n\n")
+	for i := 1; i <= 30; i++ {
+		fmt.Fprintf(&b, "%d. The offline demo provider repeats this sentence to take up room in the model's context window.\n", i)
+	}
+	return b.String()
+}
+
+// demoSummary answers a summary request the way a model would, in short: it
+// lists what the user asked, from the "User:" lines of the request.
+func demoSummary(input string) string {
+	var asked []string
+	for _, line := range strings.Split(input, "\n") {
+		if text, ok := strings.CutPrefix(line, "User: "); ok {
+			if len(text) > 60 {
+				text = text[:60] + "…"
+			}
+			asked = append(asked, text)
+		}
+	}
+	if len(asked) == 0 {
+		return "The conversation so far had no user messages worth keeping."
+	}
+	return "Demo summary of the earlier conversation. The user asked: " + strings.Join(asked, "; ") + "."
 }
 
 // demoConversationTitle titles a conversation from the first words of its message, as a

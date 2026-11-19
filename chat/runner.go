@@ -33,6 +33,9 @@ const (
 	FailureInterrupted = "interrupted"
 	// FailureInternal reports an unexpected server-side failure.
 	FailureInternal = "internal_error"
+	// FailureContextTooLong reports a turn whose input still did not fit the
+	// model's context window after the history was cut down and retried.
+	FailureContextTooLong = "context_too_long"
 )
 
 const (
@@ -64,6 +67,8 @@ func failureMessage(code string) string {
 		return "Authorization expired before the turn finished."
 	case FailureInterrupted:
 		return "The turn was interrupted."
+	case FailureContextTooLong:
+		return "The conversation is too long for the selected model."
 	default:
 		return "The turn failed."
 	}
@@ -103,8 +108,32 @@ type RunnerConfig struct {
 	// Zero means 16.
 	MaxConcurrentGlobal int
 	// MaxHistoryMessages bounds the transcript sent to the model, counted in
-	// stored messages. Zero means 50.
+	// stored messages. Zero means 50, or 200 when the model's context window
+	// is known, because the token budget then does the real limiting.
 	MaxHistoryMessages int
+	// ContextWindow is the model's input window in tokens, for a model whose
+	// choice doesn't carry one (the legacy single provider, or a catalog
+	// model without a configured window). Zero means DefaultContextWindow of
+	// the model id; a model still unknown keeps the message-count bound only.
+	ContextWindow int
+	// ContextMargin is the number of tokens the history budget keeps free.
+	// Zero means 5% of the window, at least 1024.
+	ContextMargin int
+	// KeepFullToolTurns is how many of the latest user turns send their tool
+	// results in full when the history must shrink. Older results become
+	// short stubs first. Zero means 2.
+	KeepFullToolTurns int
+	// MaxToolResultTokens bounds one tool result sent to the model (the
+	// stored result is unchanged). Zero means 8000.
+	MaxToolResultTokens int
+	// ImageTokenEstimate is the estimate for one image attachment. Zero
+	// means 1600.
+	ImageTokenEstimate int
+	// Compaction turns on conversation summaries (see CompactionConfig). Nil
+	// leaves them off: long conversations are then only trimmed. When its
+	// Model is nil and Router implements CompactionRouter, the router picks
+	// the model.
+	Compaction *CompactionConfig
 	// MaxOutputTokens bounds the tokens one model step may generate. Zero
 	// leaves the provider's default (the Anthropic adapter's own default).
 	// The Responses wire and the ChatGPT/Codex plan route do not accept an
@@ -174,6 +203,16 @@ type Runner struct {
 	titleCtx    context.Context
 	titleCancel context.CancelFunc
 
+	// historyExplicit records that the host set MaxHistoryMessages, so the
+	// larger windowed default never overrides it.
+	historyExplicit bool
+	// ctxMu guards the context bookkeeping below; see context.go.
+	ctxMu       sync.Mutex
+	ctxRecords  map[string]contextRecord
+	ctxRatios   map[string]float64
+	compacting  map[string]chan struct{}
+	lastCompact map[string]time.Time
+
 	mu             sync.Mutex
 	jobs           map[string]*turnJob
 	queue          []*turnJob
@@ -215,6 +254,7 @@ type turnJob struct {
 	tools          ToolExecutor
 	deadline       time.Time
 	settings       turnSettings
+	resolved       ResolvedModel
 	done           chan struct{}
 	// title is closed when this turn's title attempt ends; nil when none runs.
 	title chan struct{}
@@ -223,6 +263,17 @@ type turnJob struct {
 	stop      string
 	cancel    context.CancelFunc
 	authBound bool
+
+	// Owned by the worker goroutine: the estimate of the last request (for
+	// calibration), the extra shrink factor an overflow retry applies, and the
+	// step that already retried.
+	lastEstimate int
+	lastFull     int
+	shrunk       bool
+	overflowBase int
+	usageSeen    bool
+	shrink       float64
+	retriedStep  int
 }
 
 // NewRunner validates cfg, fills defaults and returns a runner.
@@ -245,6 +296,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if cfg.MaxConcurrentGlobal <= 0 {
 		cfg.MaxConcurrentGlobal = defaultMaxConcurrentGlobal
 	}
+	historyExplicit := cfg.MaxHistoryMessages > 0
 	if cfg.MaxHistoryMessages <= 0 {
 		cfg.MaxHistoryMessages = defaultMaxHistoryMessages
 	}
@@ -268,15 +320,27 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 			cfg.Titles = &titles
 		}
 	}
+	if cfg.Compaction.enabled() && cfg.Compaction.Model == nil {
+		if compactRouter, ok := cfg.Router.(CompactionRouter); ok {
+			compaction := *cfg.Compaction
+			compaction.Model = compactRouter.CompactionModel
+			cfg.Compaction = &compaction
+		}
+	}
 	titleCtx, titleCancel := context.WithCancel(context.Background())
 	return &Runner{
-		cfg:            cfg,
-		now:            nowFn,
-		broker:         newBroker(),
-		titleCtx:       titleCtx,
-		titleCancel:    titleCancel,
-		jobs:           make(map[string]*turnJob),
-		runningPerUser: make(map[string]int),
+		cfg:             cfg,
+		now:             nowFn,
+		broker:          newBroker(),
+		titleCtx:        titleCtx,
+		titleCancel:     titleCancel,
+		historyExplicit: historyExplicit,
+		ctxRecords:      make(map[string]contextRecord),
+		ctxRatios:       make(map[string]float64),
+		compacting:      make(map[string]chan struct{}),
+		lastCompact:     make(map[string]time.Time),
+		jobs:            make(map[string]*turnJob),
+		runningPerUser:  make(map[string]int),
 	}, nil
 }
 
@@ -447,6 +511,7 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 		Provider:           resolved.Choice.Provider,
 		Model:              resolved.Model,
 		Effort:             effort,
+		ContextWindow:      r.windowFor(resolved),
 	})
 	if err != nil {
 		return Turn{}, false, err
@@ -504,8 +569,11 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 		tools:          opts.Tools,
 		deadline:       opts.Deadline,
 		settings:       settings,
+		resolved:       resolved,
 		done:           make(chan struct{}),
 		title:          title,
+		shrink:         1,
+		retriedStep:    -1,
 	}
 
 	r.mu.Lock()
@@ -805,6 +873,9 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 		r.finishStopped(j, stop)
 		return
 	}
+	// A nearly full conversation whose summary is being written waits a
+	// moment for it, so this turn can already use it.
+	r.waitForCompaction(ctx, j)
 
 	for step := 0; ; step++ {
 		if step >= j.settings.maxSteps {
@@ -831,7 +902,11 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 				r.finishStopped(j, stop)
 				return
 			}
-			r.failJob(j, FailureProvider, err)
+			if r.retryOverflow(j, step, err) {
+				step--
+				continue
+			}
+			r.failJob(j, providerFailure(err), err)
 			return
 		}
 
@@ -843,9 +918,14 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 			return
 		}
 		if err != nil {
-			r.failJob(j, FailureProvider, err)
+			if text == "" && len(calls) == 0 && r.retryOverflow(j, step, err) {
+				step--
+				continue
+			}
+			r.failJob(j, providerFailure(err), err)
 			return
 		}
+		r.recordStep(j)
 
 		parts := make([]Part, 0, 1+len(calls))
 		if text != "" {
@@ -875,6 +955,7 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 			// post-turn refresh already shows it.
 			r.waitTitle(j)
 			r.finishJob(j, TurnStateRunning, TurnStateCompleted, "")
+			r.afterTurn(j)
 			return
 		}
 		for _, call := range calls {
@@ -927,6 +1008,7 @@ func (r *Runner) consume(ctx context.Context, j *turnJob, ch <-chan provider.Chu
 			if chunk.Usage == nil {
 				continue
 			}
+			r.observeUsage(j, chunk.Usage.InputTokens)
 			if _, err := r.appendTurnEvent(bg, j.owner, j.turnID, EventUsageUpdated, Usage{
 				InputTokens:  chunk.Usage.InputTokens,
 				OutputTokens: chunk.Usage.OutputTokens,
@@ -1339,17 +1421,24 @@ func (r *Runner) publishLock(key string) *sync.Mutex {
 // --- request history ---
 
 func (r *Runner) buildRequest(ctx context.Context, j *turnJob) (provider.Request, error) {
-	messages, err := r.history(ctx, j)
-	if err != nil {
-		return provider.Request{}, err
-	}
-	var defs []provider.ToolDef
+	var (
+		defs []provider.ToolDef
+		err  error
+	)
 	if j.tools != nil {
 		defs, err = j.tools.Tools(ctx)
 		if err != nil {
 			return provider.Request{}, err
 		}
 	}
+	overhead := estimateText(j.settings.system) + estimateToolDefs(defs)
+	messages, tokens, err := r.history(ctx, j, overhead)
+	if err != nil {
+		return provider.Request{}, err
+	}
+	j.lastFull += overhead
+	j.lastEstimate = overhead + tokens
+	j.usageSeen = false
 	return provider.Request{
 		Model:           j.model,
 		System:          j.settings.system,
@@ -1360,17 +1449,51 @@ func (r *Runner) buildRequest(ctx context.Context, j *turnJob) (provider.Request
 	}, nil
 }
 
-// history returns the bounded transcript in provider form. The bound counts
-// stored messages and never splits an assistant tool call from its results.
-// Attachment parts are resolved into bytes afterwards, newest message first, so
-// the request budget protects the model input rather than the transcript.
-func (r *Runner) history(ctx context.Context, j *turnJob) ([]provider.Message, error) {
+// history returns the transcript in provider form and its token estimate.
+//
+// It starts after the conversation's summary, if there is one, and is first
+// bounded by the stored-message count, never splitting an assistant tool call
+// from its results. Attachment parts are resolved into bytes newest message
+// first, so the byte budget protects the model input rather than the
+// transcript. With a known context window, buildHistory then fits the result
+// into the token budget (see budget.go). overhead is the estimate of the
+// system prompt and tool definitions.
+func (r *Runner) history(ctx context.Context, j *turnJob, overhead int) ([]provider.Message, int, error) {
 	stored, err := r.allMessages(ctx, j)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	summary, _ := r.latestSummary(ctx, j.owner, j.conversationID)
+	if summary.ThroughMessageID != "" {
+		stored = messagesAfter(stored, summary.ThroughMessageID)
 	}
 	stored = trimHistory(stored, j.settings.maxHistoryMessages)
-	return normalizeHistory(providerMessagesWith(stored, r.resolveAttachments(ctx, j, stored))), nil
+	res := buildHistory(historyPlan{
+		msgs:        stored,
+		summary:     summary.Text,
+		attachments: r.resolveAttachments(ctx, j, stored),
+		budget:      r.budgetFor(j, overhead),
+	})
+	j.lastFull = res.fullTokens
+	j.shrunk = res.stubbed+res.dropped+res.attachmentsDropped > 0
+	if j.shrunk {
+		r.cfg.Logger.Debug("chat: history shrunk to fit the context window",
+			"conversation", j.conversationID, "turn", j.turnID, "estimate", res.tokens,
+			"stubbed", res.stubbed, "truncated", res.truncated, "dropped", res.dropped,
+			"attachmentsDropped", res.attachmentsDropped)
+	}
+	return res.messages, res.tokens, nil
+}
+
+// messagesAfter returns the messages after the one with id through. When
+// through is not among them it is older than all of them, so all are kept.
+func messagesAfter(msgs []Message, through string) []Message {
+	for i, m := range msgs {
+		if m.ID == through {
+			return msgs[i+1:]
+		}
+	}
+	return msgs
 }
 
 // resolveAttachments reads the uploads the history window references. Newest

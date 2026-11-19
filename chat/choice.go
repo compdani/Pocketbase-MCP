@@ -29,6 +29,9 @@ type ModelChoice struct {
 	// Efforts lists the reasoning efforts a turn may request for this choice,
 	// lowest first. Absent means the model takes none.
 	Efforts []string `json:"efforts,omitempty"`
+	// ContextWindow is the model's input window in tokens. Absent means
+	// unknown: the runner then bounds history by message count only.
+	ContextWindow int `json:"contextWindow,omitempty"`
 }
 
 // ResolvedModel is a concrete provider instance and wire model for one turn.

@@ -27,6 +27,9 @@ type TurnInput struct {
 	Provider string
 	Model    string
 	Effort   string
+	// ContextWindow is the resolved model's input window in tokens, or 0
+	// when it is unknown.
+	ContextWindow int
 }
 
 // TurnSetup is a host's settings for one turn. Zero fields keep the runner's
@@ -43,6 +46,9 @@ type TurnSetup struct {
 	TurnTimeout        time.Duration
 	MaxOutputTokens    int
 	MaxHistoryMessages int
+	// ContextWindow replaces the model's context window for this turn, for
+	// example a smaller one a gateway enforces.
+	ContextWindow int
 }
 
 // TurnRefusedError is a Setup refusal whose message is safe to show the user.
@@ -91,6 +97,7 @@ type turnSettings struct {
 	timeout            time.Duration
 	maxOutputTokens    int
 	maxHistoryMessages int
+	contextWindow      int
 }
 
 // settingsFor runs the Setup hook, if any, and fills every unset value from
@@ -115,6 +122,7 @@ func (r *Runner) settingsFor(ctx context.Context, in TurnInput) (turnSettings, e
 		timeout:            setup.TurnTimeout,
 		maxOutputTokens:    setup.MaxOutputTokens,
 		maxHistoryMessages: setup.MaxHistoryMessages,
+		contextWindow:      setup.ContextWindow,
 	}
 	if strings.TrimSpace(s.system) == "" {
 		s.system = r.cfg.System
@@ -134,8 +142,14 @@ func (r *Runner) settingsFor(ctx context.Context, in TurnInput) (turnSettings, e
 	if s.maxOutputTokens <= 0 {
 		s.maxOutputTokens = r.cfg.MaxOutputTokens
 	}
+	if s.contextWindow <= 0 {
+		s.contextWindow = in.ContextWindow
+	}
 	if s.maxHistoryMessages <= 0 {
 		s.maxHistoryMessages = r.cfg.MaxHistoryMessages
+		if s.contextWindow > 0 && !r.historyExplicit {
+			s.maxHistoryMessages = windowedMaxHistoryMessages
+		}
 	}
 	return s, nil
 }

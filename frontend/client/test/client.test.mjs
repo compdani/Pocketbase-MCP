@@ -538,3 +538,15 @@ test('an ordinary ChatApiError carries no proposal', async () => {
     (err) => err instanceof ChatApiError && err.proposal === null,
   );
 });
+
+test('getContext and compactConversation address the conversation', async () => {
+  const fetch = fakeFetch(() => jsonResponse({ tokens: 1, window: 2, estimated: true, compacting: false, canCompact: true }));
+  const client = new ChatClient({ baseUrl: '', getToken: () => 't', fetch });
+  const status = await client.getContext('c/1');
+  assert.equal(status.window, 2);
+  await client.compactConversation('c/1');
+  assert.equal(fetch.calls[0].method, 'GET');
+  assert.match(fetch.calls[0].url, /\/conversations\/c%2F1\/context$/);
+  assert.equal(fetch.calls[1].method, 'POST');
+  assert.match(fetch.calls[1].url, /\/conversations\/c%2F1\/compact$/);
+});

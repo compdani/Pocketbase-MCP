@@ -18,6 +18,8 @@ import {
   proposalEntriesFromState,
   proposalEntryOf,
   registerProposalEntry,
+  CONTEXT_MARKER_TYPE,
+  contextUsageFromState,
 } from '../agent-panel.mjs';
 import { message } from './support.mjs';
 
@@ -130,6 +132,9 @@ function makeController(state) {
     },
     async loadMore() {
       calls.push({ method: 'loadMore' });
+    },
+    async compact() {
+      calls.push({ method: 'compact' });
     },
   };
 }
@@ -903,7 +908,7 @@ test('composer attachment attributes follow the server limits', () => {
 test('registerProposalEntry registers both custom renderers and tolerates doubles', () => {
   const element = new FakeElement();
   assert.equal(registerProposalEntry(element), true);
-  assert.deepEqual([...element.renderers.keys()], ['proposal', 'notice']);
+  assert.deepEqual([...element.renderers.keys()], ['proposal', 'notice', 'context-marker']);
   assert.equal(registerProposalEntry({}), false);
 
   const plain = new FakeElement();
@@ -1044,4 +1049,66 @@ test('New chat starts a draft when the controller supports it', async () => {
   other.fire('agent-new-conversation', null);
   await tick();
   assert.deepEqual(eager.calls, [{ method: 'newConversation', title: undefined }]);
+});
+
+// --- context window ----------------------------------------------------------
+
+/** An element whose prototype defines contextUsage, as agent-panel 0.5 does. */
+class FakeContextElement extends FakeElement {
+  get contextUsage() { return this._contextUsage ?? null; }
+
+  set contextUsage(value) { this._contextUsage = value; }
+}
+
+const contextOf = (overrides = {}) => ({
+  tokens: 72000, window: 100000, estimated: true, summarizedThrough: '', summarizedAt: '',
+  compacting: false, canCompact: true, ...overrides,
+});
+
+test('contextUsageFromState maps the controller context and hides an unknown window', () => {
+  assert.equal(contextUsageFromState(stateOf()), null);
+  assert.equal(contextUsageFromState(stateOf({ context: contextOf({ window: 0 }) })), null);
+  assert.deepEqual(contextUsageFromState(stateOf({ context: contextOf({ summarizedAt: '2026-11-19T10:00:00Z' }) })), {
+    used: 72000, window: 100000, estimated: true, compacting: false, canCompact: true, summarizedAt: '2026-11-19T10:00:00Z',
+  });
+});
+
+test('the binding writes contextUsage and compacts on agent-compact', async () => {
+  const controller = makeController(stateOf({ context: contextOf() }));
+  const element = new FakeContextElement();
+  bindAgentPanel(element, controller);
+  assert.equal(element.contextUsage.used, 72000);
+  element.fire('agent-compact');
+  await tick();
+  assert.deepEqual(controller.calls.map((c) => c.method), ['compact']);
+  controller.set({ context: null });
+  assert.equal(element.contextUsage, null);
+
+  // An element without contextUsage gets no expando and no button by default.
+  const old = new FakeElement();
+  bindAgentPanel(old, makeController(stateOf({ context: contextOf() })));
+  assert.equal(Object.prototype.hasOwnProperty.call(old, 'contextUsage'), false);
+});
+
+test('entriesFromState marks where the summary ends', () => {
+  const messages = [
+    message('m1', 'user', 'Hello'),
+    message('m2', 'assistant', 'Hi'),
+    message('m3', 'user', 'More'),
+  ];
+  const entries = entriesFromState(stateOf({ messages, context: contextOf({ summarizedThrough: 'm2' }) }));
+  const types = entries.map((e) => e.type);
+  const marker = types.indexOf(CONTEXT_MARKER_TYPE);
+  assert.ok(marker > 0, 'a marker is drawn');
+  assert.equal(entries[marker - 1].id, 'msg:m2');
+  assert.equal(entries[marker + 1].id, 'msg:m3');
+  assert.equal(entriesFromState(stateOf({ messages })).some((e) => e.type === CONTEXT_MARKER_TYPE), false);
+  // A boundary that is not in the loaded page draws nothing.
+  assert.equal(entriesFromState(stateOf({ messages, context: contextOf({ summarizedThrough: 'older' }) }))
+    .some((e) => e.type === CONTEXT_MARKER_TYPE), false);
+});
+
+test('the new failure codes have plain text', () => {
+  assert.match(errorText({ code: 'context_too_long' }), /too long for the selected model/);
+  assert.match(errorText({ code: 'too_soon' }), /moments ago/);
 });

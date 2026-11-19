@@ -238,3 +238,28 @@ func TestResponsesInvalidToolArgumentsDoNotComplete(t *testing.T) {
 		t.Fatalf("error=%v done=%v", sawError, sawDone)
 	}
 }
+
+func TestResponsesFailedContextOverflow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"Your input exceeds the context window of this model.\"}}}\n\n")
+	}))
+	defer srv.Close()
+	p, err := New(Config{BaseURL: srv.URL, WireAPI: WireResponses})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := p.Stream(context.Background(), provider.Request{Model: "m", Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failure error
+	for chunk := range ch {
+		if chunk.Kind == provider.ChunkError {
+			failure = chunk.Err
+		}
+	}
+	if !provider.IsContextOverflow(failure) {
+		t.Fatalf("failure = %v, want a context overflow", failure)
+	}
+}

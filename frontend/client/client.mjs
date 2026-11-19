@@ -288,6 +288,23 @@ export class ChatClient {
     });
   }
 
+  /**
+   * GET /conversations/{id}/context: how full the conversation's context is,
+   * `{ tokens, window, estimated, summarizedThrough?, summarizedAt?,
+   * compacting, canCompact }`. `window` 0 means unknown.
+   */
+  async getContext(id, { signal } = {}) {
+    return this._json('GET', `/conversations/${encodeSegment(id)}/context`, { signal });
+  }
+
+  /**
+   * POST /conversations/{id}/compact: summarize the conversation's older
+   * messages now. Answers `{ compacted, reason?, throughMessageId?, context }`.
+   */
+  async compactConversation(id, { signal } = {}) {
+    return this._json('POST', `/conversations/${encodeSegment(id)}/compact`, { signal });
+  }
+
   /** DELETE /conversations/{id} */
   async deleteConversation(id, { signal } = {}) {
     return this._json('DELETE', `/conversations/${encodeSegment(id)}`, { signal });

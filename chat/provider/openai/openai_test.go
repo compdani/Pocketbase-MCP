@@ -647,3 +647,29 @@ func TestEndToEndToolRoundTrip(t *testing.T) {
 		t.Fatalf("tool history = %+v", tool)
 	}
 }
+
+func TestContextOverflowIsRecognized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 130000 tokens.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}`)
+	}))
+	defer srv.Close()
+	p := newProvider(t, srv.URL)
+	ch, err := p.Stream(context.Background(), provider.Request{Model: "m"})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	got := collect(t, ch)
+	if len(got) != 1 || !provider.IsContextOverflow(got[0].Err) {
+		t.Fatalf("chunks = %+v, want a context overflow", got)
+	}
+
+	srv2, _ := sseServer(t, `{"error":{"message":"overloaded","type":"server_error","code":503}}`)
+	ch, err = newProvider(t, srv2.URL).Stream(context.Background(), provider.Request{Model: "m"})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if got := collect(t, ch); len(got) != 1 || provider.IsContextOverflow(got[0].Err) {
+		t.Fatalf("an overloaded stream was classified as an overflow: %+v", got)
+	}
+}

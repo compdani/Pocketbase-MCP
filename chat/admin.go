@@ -59,6 +59,9 @@ type ModelOption struct {
 	Label string `json:"label,omitempty"`
 	// Efforts lists the reasoning efforts the model accepts; empty means none.
 	Efforts []string `json:"efforts,omitempty"`
+	// ContextWindow is the model's input window in tokens; zero means the
+	// built-in default for known model ids.
+	ContextWindow int `json:"contextWindow,omitempty"`
 }
 
 // ProviderTest is the outcome of a provider reachability/auth check.

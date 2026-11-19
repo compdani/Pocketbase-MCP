@@ -619,8 +619,9 @@ func (p *Provider) consume(ctx context.Context, body io.Reader, ch chan<- provid
 			return
 		}
 		if chunk.Error != nil {
-			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf(
-				"openai: stream error %s/%s: %s", chunk.Error.Type, chunk.Error.code(), chunk.Error.Message)})
+			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: responsesFailure(
+				fmt.Sprintf("openai: stream error %s/%s: %s", chunk.Error.Type, chunk.Error.code(), chunk.Error.Message),
+				chunk.Error.code(), chunk.Error.Message)})
 			return
 		}
 		if chunk.Usage != nil {

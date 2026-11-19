@@ -91,6 +91,34 @@ export interface ChatEvent {
 export interface ChatFeatures {
   proposals: boolean;
   uploads: boolean;
+  /** Turns accept a page context. */
+  context?: boolean;
+  /** The default model's context window is known: `getContext` reports how full it is. */
+  contextManagement?: boolean;
+  /** `compactConversation` can summarize a conversation. */
+  compaction?: boolean;
+}
+
+/** How full a conversation's context is. */
+export interface ChatContextStatus {
+  /** Input tokens of the latest request, or an estimate of the next one. */
+  tokens: number;
+  /** The model's input window; 0 means unknown (show no indicator). */
+  window: number;
+  estimated: boolean;
+  /** The last message the conversation's summary covers. */
+  summarizedThrough?: string;
+  summarizedAt?: string;
+  compacting: boolean;
+  canCompact: boolean;
+}
+
+export interface ChatCompactResult {
+  compacted: boolean;
+  /** `nothing_to_compact` when there was too little to summarize. */
+  reason?: string;
+  throughMessageId?: string;
+  context: ChatContextStatus;
 }
 
 export interface ChatLimits {
@@ -206,6 +234,8 @@ export interface ChatConversationDetail {
    * the server serves proposals; absent means the feature is off.
    */
   proposals?: ChatProposal[];
+  /** Present when the server manages the context window or summaries. */
+  context?: ChatContextStatus;
 }
 
 export interface ChatSubmitResult {
@@ -358,6 +388,10 @@ export declare class ChatClient {
   renameConversation(id: string, title: string, options?: RequestOptions): Promise<ChatConversation>;
 
   deleteConversation(id: string, options?: RequestOptions): Promise<null>;
+
+  getContext(id: string, options?: RequestOptions): Promise<ChatContextStatus>;
+
+  compactConversation(id: string, options?: RequestOptions): Promise<ChatCompactResult>;
 
   /** Generates an Idempotency-Key when none is supplied. */
   submitTurn(conversationId: string, options: SubmitTurnOptions): Promise<ChatSubmitResult>;

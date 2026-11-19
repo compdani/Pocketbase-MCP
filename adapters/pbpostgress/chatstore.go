@@ -109,6 +109,9 @@ const (
 	chatFieldVersion         = "version"
 	chatFieldData            = "data"
 	chatFieldAt              = "at"
+	// chatFieldContextSummary holds the conversation's summary (a
+	// chat.Summary as JSON text), or nothing.
+	chatFieldContextSummary = "contextSummary"
 
 	// Proposal fields. They keep the chat.Proposal names, except that the
 	// conversation and turn bindings use their own column names so a proposal
@@ -230,6 +233,7 @@ var _ chat.ProposalStore = (*ChatStore)(nil)
 var _ chat.UploadStore = (*ChatStore)(nil)
 var _ chat.ActiveTurnStore = (*ChatStore)(nil)
 var _ chat.RecentMessageStore = (*ChatStore)(nil)
+var _ chat.SummaryStore = (*ChatStore)(nil)
 
 var chatCollectionPrefixPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -368,8 +372,11 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 					chatTextField(chatFieldTarget, chatMaxTextLen, true),
 					&core.DateField{Name: chatFieldCreatedAt, System: true},
 					&core.DateField{Name: chatFieldUpdatedAt, System: true},
+					chatJSONTextField(chatFieldContextSummary),
 				)
 			},
+			// v1.4 adds the conversation summary. Older stores gain it in place.
+			addFields: []string{chatFieldContextSummary},
 			indexes: []chatIndexSpec{
 				// Both columns are VARCHAR(255) on MySQL, so two text
 				// columns (2040 bytes in utf8mb4) stay well below the
@@ -1827,4 +1834,67 @@ func chatDecodeCursor(cursor string) (*chatCursor, error) {
 		return nil, fmt.Errorf("chat: invalid page cursor: %w", err)
 	}
 	return &chatCursor{at: time.Unix(0, n).UTC(), id: id}, nil
+}
+
+// LatestSummary implements chat.SummaryStore. The summary lives on the
+// conversation record, so deleting the conversation deletes it.
+func (s *ChatStore) LatestSummary(_ context.Context, owner chat.OwnerKey, conversationID string) (chat.Summary, bool, error) {
+	rec, err := chatFindOwned(s.app, s.conversations, owner, conversationID)
+	if err != nil {
+		return chat.Summary{}, false, err
+	}
+	return chatSummaryFrom(rec)
+}
+
+// PutSummary implements chat.SummaryStore: it stores sum only while the
+// stored summary's boundary is still prevThrough. It leaves the
+// conversation's title and updatedAt alone, so a summary never reorders a
+// list or looks like activity.
+func (s *ChatStore) PutSummary(ctx context.Context, owner chat.OwnerKey, sum chat.Summary, prevThrough string) (bool, error) {
+	raw, err := json.Marshal(sum)
+	if err != nil {
+		return false, err
+	}
+	stored := false
+	err = s.chatRunTx(func(tx core.App) error {
+		stored = false
+		rec, err := chatLockAndFind(tx, s.conversations, owner, sum.ConversationID)
+		if err != nil {
+			return err
+		}
+		current, found, err := chatSummaryFrom(rec)
+		if err != nil {
+			return err
+		}
+		if found && current.ThroughMessageID != prevThrough || !found && prevThrough != "" {
+			return nil
+		}
+		if err := chatSetJSON(rec, chatFieldContextSummary, raw); err != nil {
+			return err
+		}
+		if err := tx.SaveWithContext(ctx, rec); err != nil {
+			return err
+		}
+		stored = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return stored, nil
+}
+
+func chatSummaryFrom(rec *core.Record) (chat.Summary, bool, error) {
+	raw := chatRawJSON(rec, chatFieldContextSummary)
+	if len(raw) == 0 || string(raw) == "null" {
+		return chat.Summary{}, false, nil
+	}
+	var sum chat.Summary
+	if err := json.Unmarshal(raw, &sum); err != nil {
+		return chat.Summary{}, false, fmt.Errorf("chat store: decode summary: %w", err)
+	}
+	if sum.ThroughMessageID == "" {
+		return chat.Summary{}, false, nil
+	}
+	return sum, true, nil
 }

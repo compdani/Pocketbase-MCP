@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	pbmcp "github.com/compdani/pocketbase-mcp"
+	"github.com/compdani/pocketbase-mcp/chat"
 	"github.com/compdani/pocketbase-mcp/chat/provider"
 )
 
@@ -215,5 +216,20 @@ func TestDemoEditNoteToolPassesStartupValidation(t *testing.T) {
 	tool := demoEditNoteTool()
 	if tool.Channels != "chat" || tool.ExecutionLocation != "editor" || tool.Handler != nil {
 		t.Fatalf("edit_note must be a chat-only editor tool without a handler: %#v", tool)
+	}
+}
+
+func TestDemoProviderSummarizes(t *testing.T) {
+	chunks := demoChunks(provider.Request{
+		Model:    "demo-1",
+		System:   chat.CompactionSystemPrompt,
+		Messages: []provider.Message{{Role: provider.RoleUser, Text: "User: hello\nAssistant: hi\nUser: search contracts\n"}},
+	})
+	var text strings.Builder
+	for _, c := range chunks {
+		text.WriteString(c.Text)
+	}
+	if got := text.String(); !strings.Contains(got, "hello; search contracts") {
+		t.Fatalf("summary = %q", got)
 	}
 }

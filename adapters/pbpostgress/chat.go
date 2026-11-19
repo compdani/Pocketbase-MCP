@@ -80,6 +80,12 @@ type ChatConfig struct {
 	// an administrator sets (POST /providers/actions/title) wins. A
 	// RunnerConfig.Titles set by the host replaces all of this.
 	TitleModel string
+	// CompactionModel turns on conversation summaries: when a conversation
+	// nears its model's context window, its oldest messages are summarized
+	// for the model, and a user can ask for a summary at once. It takes the
+	// same forms as TitleModel ("auto", a choice or model id, "" or "off").
+	// A RunnerConfig.Compaction set by the host replaces it.
+	CompactionModel string
 }
 
 // chatMount is the registered chat surface: its HTTP handler and the runner
@@ -207,11 +213,12 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 			}
 		}
 		built, err := catalog.NewRouter(context.Background(), catalog.RouterOptions{
-			TitleChoice: cfg.TitleModel,
-			Scope:       scope,
-			Store:       providerStore,
-			Static:      staticProviders(cfg),
-			Logger:      s.Adapter.app.Logger(),
+			TitleChoice:      cfg.TitleModel,
+			CompactionChoice: cfg.CompactionModel,
+			Scope:            scope,
+			Store:            providerStore,
+			Static:           staticProviders(cfg),
+			Logger:           s.Adapter.app.Logger(),
 		})
 		if err != nil {
 			return fmt.Errorf("pbpostgress: provider catalog: %w", err)
@@ -243,6 +250,9 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 		cfg.RunnerConfig.System = cfg.System
 		if cfg.RunnerConfig.Titles == nil {
 			cfg.RunnerConfig.Titles = chatTitles(cfg, router != nil)
+		}
+		if cfg.RunnerConfig.Compaction == nil {
+			cfg.RunnerConfig.Compaction = chatCompaction(cfg, router)
 		}
 		if cfg.RunnerConfig.Logger == nil {
 			// Failed turns record only a generic message; the cause goes to
@@ -461,6 +471,39 @@ func chatTitles(cfg ChatConfig, catalogMode bool) *chat.TitleConfig {
 		}
 		return chat.ResolvedModel{
 			Choice:   chat.ModelChoice{Provider: turn.Choice.Provider, Model: choice},
+			Provider: cfg.Provider,
+			Model:    choice,
+		}, true
+	}}
+}
+
+// chatCompaction is the default summary configuration. A catalog router
+// decides off, auto or a model from CompactionModel; the legacy single
+// provider summarizes when CompactionModel asks, with the turn's model or the
+// named model on that provider.
+func chatCompaction(cfg ChatConfig, router *catalog.Router) *chat.CompactionConfig {
+	if router != nil {
+		if !router.CompactionEnabled() {
+			return nil
+		}
+		return &chat.CompactionConfig{}
+	}
+	choice := strings.TrimSpace(cfg.CompactionModel)
+	if choice == "" || strings.EqualFold(choice, chat.CompactionChoiceOff) {
+		return nil
+	}
+	if strings.EqualFold(choice, chat.CompactionChoiceAuto) {
+		return &chat.CompactionConfig{}
+	}
+	if _, model, ok := chat.SplitChoiceID(choice); ok {
+		choice = model
+	}
+	return &chat.CompactionConfig{Model: func(_ context.Context, turn chat.ResolvedModel) (chat.ResolvedModel, bool) {
+		if cfg.Provider == nil {
+			return turn, true
+		}
+		return chat.ResolvedModel{
+			Choice:   chat.ModelChoice{Provider: turn.Choice.Provider, Model: choice, ContextWindow: chat.DefaultContextWindow(choice)},
 			Provider: cfg.Provider,
 			Model:    choice,
 		}, true

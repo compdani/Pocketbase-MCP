@@ -2,6 +2,7 @@
 
 import type {
   ChatClient,
+  ChatCompactResult,
   ChatConversation,
   ChatFeatures,
   ChatHunkOutcome,
@@ -166,6 +167,23 @@ export interface ChatControllerState {
   defaultChoice: string;
   /** The picker's current choice id, or ''. */
   choice: string;
+  /**
+   * How full the open conversation's context is, or null when the server
+   * doesn't say. Updated on open, after each turn and by compact().
+   */
+  context: ChatControllerContext | null;
+}
+
+export interface ChatControllerContext {
+  tokens: number;
+  /** 0 means unknown. */
+  window: number;
+  estimated: boolean;
+  /** The last message the summary covers, or ''. */
+  summarizedThrough: string;
+  summarizedAt: string;
+  compacting: boolean;
+  canCompact: boolean;
 }
 
 export interface ChatDecideOptions {
@@ -258,6 +276,15 @@ export declare class ChatController extends EventTarget {
   newConversation(title?: string): Promise<ChatConversation | null>;
 
   rename(conversationId: string, title: string): Promise<ChatConversation | null>;
+
+  /** Re-read how full the open conversation's context is. */
+  refreshContext(): Promise<ChatControllerContext | null>;
+
+  /**
+   * Summarize the open conversation's older messages now. Resolves to the
+   * server's answer, or null when nothing is open or it failed (see `error`).
+   */
+  compact(): Promise<ChatCompactResult | null>;
 
   /** Delete a conversation; the active one is cleared. */
   remove(conversationId: string): Promise<boolean>;

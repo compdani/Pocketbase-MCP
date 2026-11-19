@@ -183,7 +183,7 @@ func applyInput(p Provider, in chat.ProviderInput) Provider {
 	if in.Models != nil {
 		models := make([]Model, 0, len(*in.Models))
 		for _, m := range *in.Models {
-			models = append(models, Model{ID: m.ID, Label: m.Label, Efforts: m.Efforts})
+			models = append(models, Model{ID: m.ID, Label: m.Label, Efforts: m.Efforts, ContextWindow: m.ContextWindow})
 		}
 		p.Models = models
 	}
@@ -314,6 +314,9 @@ func (a *Admin) RefreshProviderModels(ctx context.Context, id string, save bool)
 		for i, m := range models {
 			if old, ok := p.Model(m.ID); ok && len(m.Efforts) == 0 && len(old.Efforts) > 0 {
 				models[i].Efforts = old.Efforts
+			}
+			if old, ok := p.Model(m.ID); ok && m.ContextWindow == 0 && old.ContextWindow > 0 {
+				models[i].ContextWindow = old.ContextWindow
 			}
 		}
 		p.Models = models
@@ -643,7 +646,7 @@ func (a *Admin) listHTTPModels(ctx context.Context, p Provider, endpoint string,
 func toOptions(models []Model) []chat.ModelOption {
 	out := make([]chat.ModelOption, 0, len(models))
 	for _, m := range models {
-		out = append(out, chat.ModelOption{ID: m.ID, Label: m.Label, Efforts: m.Efforts})
+		out = append(out, chat.ModelOption{ID: m.ID, Label: m.Label, Efforts: m.Efforts, ContextWindow: m.ContextWindow})
 	}
 	return out
 }

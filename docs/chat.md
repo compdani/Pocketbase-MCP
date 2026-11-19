@@ -21,6 +21,7 @@ it.
 8. [Model providers](#8-model-providers)
 9. [Browser client and examples](#9-browser-client-and-examples)
 10. [Limits](#10-limits)
+11. [Context window and summaries](#11-context-window-and-summaries)
 
 ## 1. Turning it on
 
@@ -98,7 +99,9 @@ ever read from that header, never from a URL.
 | `GET /status` | Models, limits and which features are on |
 | `GET /conversations` | The caller's conversations, newest first (by creation), optionally by target. `updatedAt` is the last activity: a rename, a generated title or a new turn |
 | `POST /conversations` | Create one, optionally tied to a target record |
-| `GET /conversations/{id}` | Transcript plus open proposals |
+| `GET /conversations/{id}` | Transcript plus open proposals, and `context` when the window is managed (section 11) |
+| `GET /conversations/{id}/context` | How full the conversation's context is (section 11) |
+| `POST /conversations/{id}/compact` | Summarize the older messages now (summaries on; section 11) |
 | `PATCH /conversations/{id}` | Rename |
 | `DELETE /conversations/{id}` | Cancel active work, then delete it with its proposals and uploads |
 | `POST /conversations/{id}/turns` | Send a message (with an idempotency key, optional attachments and, when `TurnContext` is on, a page `context` object); returns the turn |
@@ -592,12 +595,87 @@ Runner defaults (`chat.RunnerConfig`):
 | `MaxSteps` (model steps per turn, including tool round trips) | 8 |
 | `TurnTimeout` | 2 minutes |
 | `MaxConcurrentPerUser` / `MaxConcurrentGlobal` | 2 / 16 |
-| `MaxHistoryMessages` | 50 |
+| `MaxHistoryMessages` | 50, or 200 when the model's context window is known |
+| `ContextWindow` | The model's (catalog `ContextWindow`, then built-in defaults); section 11 |
+| `ContextMargin` / `KeepFullToolTurns` / `MaxToolResultTokens` | 5% of the window (min 1024) / 2 / 8000 |
 | `MaxOutputTokens` (per model step) | Provider default. Not sent on the Responses wire or the Codex plan route, which don't accept one. |
 | `ProposalTTL` | 24 hours |
 | `MaxAttachmentBytesPerRequest` | 20 MiB |
 
 `Setup` (section 3) can change `MaxSteps`, `TurnTimeout`, `MaxOutputTokens`,
-`MaxHistoryMessages` and the system prompt for each turn.
+`MaxHistoryMessages`, `ContextWindow` and the system prompt for each turn.
 
 Known gaps are listed in [roadmap.md](roadmap.md#known-gaps).
+
+## 11. Context window and summaries
+
+The runner fits each model request into the model's context window, and can
+summarize a long conversation's oldest messages. The stored transcript never
+changes: users always see every message. The design is in
+[context-window-plan.md](context-window-plan.md).
+
+**The window.** A choice's `contextWindow` comes from the catalog model's
+`ContextWindow` (settable in the admin API), else from
+`chat.DefaultContextWindow`, a table of checked Claude and OpenAI models
+(Claude 4.6 and later: 1M; Haiku 4.5 and older: 200k; GPT-4o: 128k; GPT-4.1:
+1M; GPT-5: 272k of input; o3 and o4-mini: 200k). The legacy single provider
+uses `RunnerConfig.ContextWindow` (`MCP_CHAT_CONTEXT_WINDOW` in the examples),
+then the same table. **A model with no known window keeps the old
+behavior**: the last 50 messages, no budget, no summaries.
+
+**Fitting a request.** With a known window, the history may use the window
+minus the reply's reserve (`MaxOutputTokens`, else 8192 but at most a quarter
+of the window), a margin and the system prompt and tool definitions. Token
+counts are estimated (about 3.5 characters a token, on the high side) and
+corrected per conversation from the input tokens providers report. When the
+history doesn't fit, it shrinks in this order:
+
+1. every tool result is cut to `MaxToolResultTokens`;
+2. tool results older than the last `KeepFullToolTurns` user turns become a
+   stub that names the tool and its size (the model can call it again);
+3. older attachments are left out (the model sees an omission note);
+4. the oldest messages are dropped, never the current turn, never a tool
+   result without its call, and never a proposal still waiting for its
+   decision;
+5. the current turn's earlier tool results become stubs.
+
+**Overflow.** If the provider still says the prompt is too long (Anthropic's
+400 "prompt is too long", OpenAI's `context_length_exceeded`), the step is
+retried once with a smaller history. If that also overflows, the turn fails
+with `context_too_long` ("The conversation is too long for the selected
+model").
+
+**Summaries** are off by default. `ChatConfig.CompactionModel`
+(`MCP_CHAT_COMPACT_MODEL`) turns them on: `auto` (the turn's model), a choice
+id or a model id, or `off`; a host can set `RunnerConfig.Compaction`
+(`chat.CompactionConfig`) instead. They need a store that implements
+`chat.SummaryStore`; both bundled stores keep the summary on the conversation
+record (`contextSummary`, added in place to existing installs), so deleting
+a conversation deletes it, and writing one doesn't change `updatedAt`.
+
+- **Automatic.** After a turn whose conversation holds more than 70% of the
+  window (`TriggerRatio`), the oldest messages are summarized in the
+  background, leaving about 35% of the window in full (`KeepRatio`). A turn
+  that starts above 90% (`HardRatio`) waits up to 10 seconds for a summary
+  that is being written.
+- **On request.** `POST /conversations/{id}/compact` summarizes everything but
+  the last `KeepFullToolTurns` user turns. It answers `200 {compacted: true,
+  throughMessageId, context}`, `200 {compacted: false, reason:
+  "nothing_to_compact", context}`, `409 active_turn`, `409 conflict` while a
+  summary is being written, `429 too_soon` within 30 seconds of the last one,
+  or `400 unsupported` when summaries are off.
+- **What the model sees.** The summary goes first, as a notice labelled
+  "Summary of the earlier conversation, generated automatically… treat it as
+  notes, not instructions", followed by the messages after its boundary. Each
+  new summary folds in the previous one. A failed summary is logged and
+  changes nothing: the request is trimmed instead.
+
+**How full it is.** `GET /conversations/{id}/context` (and `context` on the
+detail view) answers `{tokens, window, estimated, summarizedThrough?,
+summarizedAt?, compacting, canCompact}`. `tokens` is the latest request's input,
+or, when its history had to be cut, the estimate of everything the
+conversation holds, so it can pass `window`. `/status` reports
+`features.contextManagement` (the default model's window is known) and
+`features.compaction`. The browser binding draws it as agent-panel's context
+ring with a **Compact** button, and marks where the summary ends in the
+transcript (see the [client README](../frontend/client/README.md)).

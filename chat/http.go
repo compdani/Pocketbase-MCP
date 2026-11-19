@@ -57,6 +57,8 @@ const (
 	// CodeTurnRefused reports a turn the host's Setup hook refused, with the
 	// host's user-facing reason. Nothing was stored.
 	CodeTurnRefused = "turn_refused"
+	// CodeTooSoon reports a summary asked for moments after the previous one.
+	CodeTooSoon = "too_soon"
 )
 
 // Fixed, user-safe error messages. Server-internal error text is never echoed.
@@ -70,6 +72,10 @@ const (
 	msgPayloadTooLarge  = "The request body is too large."
 	msgMethodNotAllowed = "The method is not allowed."
 	msgInternal         = "The request could not be completed."
+
+	msgCompactionUnavailable = "Summarizing conversations isn't enabled here."
+	msgCompactionBusy        = "The conversation is already being summarized."
+	msgCompactionTooSoon     = "The conversation was summarized moments ago."
 
 	msgProposalUnsupported = "This proposal cannot be decided here."
 	msgProposalStale       = "The proposal is out of date."
@@ -450,6 +456,8 @@ func (h *handler) routes() *http.ServeMux {
 		{http.MethodPatch, p + "/conversations/{id}", h.renameConversation},
 		{http.MethodDelete, p + "/conversations/{id}", h.deleteConversation},
 		{http.MethodPost, p + "/conversations/{id}/turns", h.submitTurn},
+		{http.MethodGet, p + "/conversations/{id}/context", h.conversationContext},
+		{http.MethodPost, p + "/conversations/{id}/compact", h.compactConversation},
 		{http.MethodGet, p + "/turns/{id}", h.getTurn},
 		{http.MethodGet, p + "/turns/{id}/events", h.turnEvents},
 		{http.MethodPost, p + "/turns/{id}/cancel", h.cancelTurn},
@@ -799,6 +807,12 @@ type featuresView struct {
 	Uploads   bool `json:"uploads"`
 	// Context is only present when turns accept a page context.
 	Context bool `json:"context,omitempty"`
+	// ContextManagement is present when the default model's context window
+	// is known, so GET /conversations/{id}/context reports how full it is.
+	ContextManagement bool `json:"contextManagement,omitempty"`
+	// Compaction is present when POST /conversations/{id}/compact can
+	// summarize a conversation.
+	Compaction bool `json:"compaction,omitempty"`
 }
 
 type limitsView struct {
@@ -835,6 +849,9 @@ type conversationDetailView struct {
 	Messages     []Message    `json:"messages"`
 	NextCursor   string       `json:"nextCursor"`
 	ActiveTurn   *Turn        `json:"activeTurn"`
+	// Context is present when the context window is managed (see
+	// featuresView.ContextManagement) or summaries are on.
+	Context *ContextStatus `json:"context,omitempty"`
 }
 
 // conversationDetailWithProposalsView is conversationDetailView plus the
@@ -846,7 +863,8 @@ type conversationDetailWithProposalsView struct {
 	NextCursor   string       `json:"nextCursor"`
 	ActiveTurn   *Turn        `json:"activeTurn"`
 	// Proposals lists pending, approved and executing proposals, oldest first.
-	Proposals []Proposal `json:"proposals"`
+	Proposals []Proposal     `json:"proposals"`
+	Context   *ContextStatus `json:"context,omitempty"`
 }
 
 type submitTurnView struct {
@@ -1177,9 +1195,11 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 		Choices:       choices,
 		DefaultChoice: defaultChoice.ID,
 		Features: featuresView{
-			Proposals: h.cfg.Proposals != nil,
-			Uploads:   h.cfg.Uploads != nil,
-			Context:   h.cfg.TurnContext,
+			Proposals:         h.cfg.Proposals != nil,
+			Uploads:           h.cfg.Uploads != nil,
+			Context:           h.cfg.TurnContext,
+			ContextManagement: h.cfg.Runner.ContextManagement(r.Context()),
+			Compaction:        h.cfg.Runner.CompactionEnabled(),
 		},
 		Limits: limits,
 	})
@@ -1308,12 +1328,18 @@ func (h *handler) getConversation(w http.ResponseWriter, r *http.Request) {
 		h.storeError(w, err)
 		return
 	}
+	contextStatus, err := h.contextStatus(r, caller.Owner, conv.ID)
+	if err != nil {
+		h.storeError(w, err)
+		return
+	}
 	if h.cfg.Proposals == nil {
 		h.writeJSON(w, http.StatusOK, conversationDetailView{
 			Conversation: conv,
 			Messages:     msgs,
 			NextCursor:   next,
 			ActiveTurn:   active,
+			Context:      contextStatus,
 		})
 		return
 	}
@@ -1330,7 +1356,95 @@ func (h *handler) getConversation(w http.ResponseWriter, r *http.Request) {
 		NextCursor:   next,
 		ActiveTurn:   active,
 		Proposals:    proposals,
+		Context:      contextStatus,
 	})
+}
+
+// contextStatus is the conversation's context status for the detail view, or
+// nil when neither the window nor summaries are managed, so such a deployment
+// emits exactly the previous body.
+func (h *handler) contextStatus(r *http.Request, owner OwnerKey, conversationID string) (*ContextStatus, error) {
+	if !h.cfg.Runner.CompactionEnabled() && !h.cfg.Runner.ContextManagement(r.Context()) {
+		return nil, nil
+	}
+	status, err := h.cfg.Runner.ContextStatus(r.Context(), owner, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
+// conversationContext reports how full the conversation's context is.
+func (h *handler) conversationContext(w http.ResponseWriter, r *http.Request) {
+	caller, ok := h.requireCaller(w, r)
+	if !ok {
+		return
+	}
+	conv, ok := h.gateConversation(w, r, caller, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	status, err := h.cfg.Runner.ContextStatus(r.Context(), caller.Owner, conv.ID)
+	if err != nil {
+		h.storeError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, status)
+}
+
+type compactView struct {
+	Compacted        bool          `json:"compacted"`
+	Reason           string        `json:"reason,omitempty"`
+	ThroughMessageID string        `json:"throughMessageId,omitempty"`
+	Context          ContextStatus `json:"context"`
+}
+
+// compactConversation summarizes the conversation's older messages now.
+func (h *handler) compactConversation(w http.ResponseWriter, r *http.Request) {
+	caller, ok := h.requireCaller(w, r)
+	if !ok {
+		return
+	}
+	conv, ok := h.gateConversation(w, r, caller, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if !h.cfg.Runner.CompactionEnabled() {
+		h.writeError(w, http.StatusBadRequest, CodeUnsupported, msgCompactionUnavailable)
+		return
+	}
+	active, err := h.activeTurn(r.Context(), caller.Owner, conv.ID)
+	if err != nil {
+		h.storeError(w, err)
+		return
+	}
+	if active != nil {
+		h.writeError(w, http.StatusConflict, CodeActiveTurn, msgActiveTurn)
+		return
+	}
+	res, err := h.cfg.Runner.Compact(r.Context(), caller.Owner, conv.ID)
+	switch {
+	case err == nil:
+		h.writeJSON(w, http.StatusOK, compactView{Compacted: true, ThroughMessageID: res.Summary.ThroughMessageID, Context: res.Context})
+	case errors.Is(err, ErrNothingToCompact):
+		status, statusErr := h.cfg.Runner.ContextStatus(r.Context(), caller.Owner, conv.ID)
+		if statusErr != nil {
+			h.storeError(w, statusErr)
+			return
+		}
+		h.writeJSON(w, http.StatusOK, compactView{Compacted: false, Reason: "nothing_to_compact", Context: status})
+	case errors.Is(err, ErrCompactionUnavailable):
+		h.writeError(w, http.StatusBadRequest, CodeUnsupported, msgCompactionUnavailable)
+	case errors.Is(err, ErrCompactionBusy):
+		h.writeError(w, http.StatusConflict, CodeConflict, msgCompactionBusy)
+	case errors.Is(err, ErrCompactionTooSoon):
+		h.writeError(w, http.StatusTooManyRequests, CodeTooSoon, msgCompactionTooSoon)
+	case errors.Is(err, ErrNotFound):
+		h.storeError(w, err)
+	default:
+		h.cfg.Runner.cfg.Logger.Warn("chat: conversation summary failed", "conversation", conv.ID, "error", err.Error())
+		h.writeError(w, http.StatusBadGateway, CodeInternal, msgInternal)
+	}
 }
 
 func (h *handler) renameConversation(w http.ResponseWriter, r *http.Request) {

@@ -85,8 +85,29 @@ function initialState() {
     choices: [],
     defaultChoice: '',
     choice: '',
+    context: null,
   };
 }
+
+/** Keep a well-formed context status from the server, or null. */
+function contextOf(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const tokens = Number(raw.tokens);
+  const window = Number(raw.window);
+  return {
+    tokens: Number.isFinite(tokens) && tokens > 0 ? tokens : 0,
+    window: Number.isFinite(window) && window > 0 ? window : 0,
+    estimated: raw.estimated === true,
+    summarizedThrough: typeof raw.summarizedThrough === 'string' ? raw.summarizedThrough : '',
+    summarizedAt: typeof raw.summarizedAt === 'string' ? raw.summarizedAt : '',
+    compacting: raw.compacting === true,
+    canCompact: raw.canCompact === true,
+  };
+}
+
+/** How often, and how many times, a background summary is checked for. */
+const CONTEXT_POLL_MS = 3000;
+const CONTEXT_POLL_ATTEMPTS = 20;
 
 /**
  * Resolve a picker value or model id to one catalog choice. An opaque choice id
@@ -409,6 +430,7 @@ export class ChatController extends EventTarget {
 
     this._epoch = 0;
     this._openToken = 0;
+    this._compactionWatch = null;
     this._listToken = 0;
     this._streamToken = 0;
     this._streamAbort = null;
@@ -733,7 +755,11 @@ export class ChatController extends EventTarget {
       if (Array.isArray(detail?.proposals)) {
         patch.proposals = this._mergeServerProposals(detail.proposals);
       }
+      if (detail && 'context' in detail) patch.context = contextOf(detail.context);
       if (Object.keys(patch).length > 0) this._set(patch);
+      // A nearly full conversation is summarized in the background after
+      // the turn: watch for it so the view can mark where it starts.
+      if (patch.context?.compacting) this._watchCompaction(conversationId);
       // A finished turn moves the conversation's activity time, and the server
       // may have titled it: re-read the list here and in other controllers.
       this._announce();
@@ -1046,6 +1072,7 @@ export class ChatController extends EventTarget {
       turn: null,
       running: false,
       error: null,
+      context: null,
     });
     return this._state;
   }
@@ -1068,6 +1095,7 @@ export class ChatController extends EventTarget {
       turn: null,
       running: false,
       error: null,
+      context: null,
     });
 
     try {
@@ -1094,6 +1122,7 @@ export class ChatController extends EventTarget {
           proposals: mergeProposals([], proposals),
           turn: view,
           running: !isTerminalState(active.state),
+          context: contextOf(detail?.context),
         });
         // Stream from the beginning: the reducer is the source of the live
         // turn text, and replay from 0 is exactly the subscription's starting
@@ -1106,6 +1135,7 @@ export class ChatController extends EventTarget {
           proposals: mergeProposals([], proposals),
           turn: null,
           running: false,
+          context: contextOf(detail?.context),
         });
       }
     } catch (err) {
@@ -1139,12 +1169,89 @@ export class ChatController extends EventTarget {
         turn: null,
         running: false,
         error: null,
+        context: null,
       });
       this._listChanged();
       return conversation;
     } catch (err) {
       if (!this._current(epoch)) return null;
       if (!isAbort(err)) this._set({ error: errorOf(err) });
+      return null;
+    }
+  }
+
+  /** Re-read how full the open conversation's context is. */
+  refreshContext() {
+    return this._track(this._refreshContext(this._state.activeConversationId));
+  }
+
+  async _refreshContext(conversationId) {
+    if (this._disposed || !conversationId) return this._state.context;
+    const epoch = this._epoch;
+    const openToken = this._openToken;
+    try {
+      const context = contextOf(await this._client.getContext(conversationId));
+      if (!this._current(epoch) || openToken !== this._openToken) return this._state.context;
+      if (this._state.activeConversationId !== conversationId) return this._state.context;
+      this._set({ context });
+      return context;
+    } catch (err) {
+      // The indicator is advisory: a failed read leaves the last value.
+      return this._state.context;
+    }
+  }
+
+  /** Poll for a background summary until it lands or the attempts run out. */
+  _watchCompaction(conversationId) {
+    if (this._compactionWatch === conversationId) return;
+    this._compactionWatch = conversationId;
+    const openToken = this._openToken;
+    this._track((async () => {
+      try {
+        for (let i = 0; i < CONTEXT_POLL_ATTEMPTS; i += 1) {
+          try {
+            await sleep(CONTEXT_POLL_MS, this._lifecycle.signal);
+          } catch {
+            return;
+          }
+          if (openToken !== this._openToken || this._state.activeConversationId !== conversationId) return;
+          const context = await this._refreshContext(conversationId);
+          if (!context?.compacting) return;
+        }
+      } finally {
+        if (this._compactionWatch === conversationId) this._compactionWatch = null;
+      }
+    })());
+  }
+
+  /**
+   * Summarize the open conversation's older messages now (the server keeps
+   * the last turns in full). Resolves to the server's answer, or null when
+   * nothing is open or the request failed (the error is in state).
+   */
+  compact() {
+    return this._track(this._compact(this._state.activeConversationId));
+  }
+
+  async _compact(conversationId) {
+    if (this._disposed || !conversationId) return null;
+    const epoch = this._epoch;
+    const openToken = this._openToken;
+    const before = this._state.context;
+    this._set({ context: { ...(before ?? contextOf({})), compacting: true }, error: null });
+    try {
+      const result = await this._client.compactConversation(conversationId);
+      if (!this._current(epoch) || openToken !== this._openToken) return result;
+      if (this._state.activeConversationId !== conversationId) return result;
+      this._set({ context: contextOf(result?.context) ?? { ...(before ?? contextOf({})), compacting: false } });
+      return result;
+    } catch (err) {
+      if (!this._current(epoch) || openToken !== this._openToken) return null;
+      if (this._state.activeConversationId === conversationId) {
+        const patch = { context: before ? { ...before, compacting: false } : null };
+        if (!isAbort(err)) patch.error = errorOf(err);
+        this._set(patch);
+      }
       return null;
     }
   }

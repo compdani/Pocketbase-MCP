@@ -175,11 +175,14 @@ async function signIn(auth) {
   const controller = new ChatController({ client, editor, storageKey });
   // The binding registers the proposal/notice renderers and mirrors the
   // server's attachment limits onto the composer.
-  const binding = bindAgentPanel(page, controller, { client });
+  // contextUsage: 'slot' shows how full the context is, with a Compact button,
+  // even on agent-panel versions without the built-in context ring (0.5+
+  // draws its own ring and the binding uses that instead).
+  const binding = bindAgentPanel(page, controller, { client, contextUsage: 'slot' });
   // The side panel: same account and client, its own controller and view.
   // No editor adapter here: approving an edit_note proposal is the page's job.
   const sideController = new ChatController({ client, storageKey });
-  const sideBinding = bindAgentPanel(side, sideController, { client });
+  const sideBinding = bindAgentPanel(side, sideController, { client, contextUsage: 'slot' });
   session = { client, controller, binding, sideController, sideBinding };
 
   who.textContent = record.email || record.id || 'demo user';

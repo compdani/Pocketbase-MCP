@@ -179,6 +179,10 @@ type fixtureOptions struct {
 	turnContext bool
 	maxContext  int
 	setup       func(context.Context, TurnInput) (TurnSetup, error)
+	// contextWindow sets RunnerConfig.ContextWindow; compaction turns
+	// summaries on.
+	contextWindow int
+	compaction    bool
 }
 
 // apiFixture wires a real handler behind an httptest server, with the same
@@ -208,6 +212,10 @@ func newFixture(t *testing.T, opts fixtureOptions) *apiFixture {
 		}
 	}
 	runnerCfg := RunnerConfig{Store: store, Provider: prov, Model: "model-a", Router: opts.router, Setup: opts.setup}
+	runnerCfg.ContextWindow = opts.contextWindow
+	if opts.compaction {
+		runnerCfg.Compaction = &CompactionConfig{}
+	}
 	var proposals ProposalStore
 	if opts.proposals {
 		runnerCfg.Proposals = store

@@ -40,6 +40,9 @@ type convRecord struct {
 	turnIDs      []string
 	proposalIDs  []string
 	uploadIDs    []string
+	// summary is the conversation's summary; nil when it has none. It goes
+	// with the conversation when that is deleted.
+	summary *Summary
 }
 
 type uploadRecord struct {
@@ -74,6 +77,7 @@ type MemStore struct {
 }
 
 var _ Store = (*MemStore)(nil)
+var _ SummaryStore = (*MemStore)(nil)
 var _ ProposalStore = (*MemStore)(nil)
 var _ ActiveTurnStore = (*MemStore)(nil)
 var _ RecentMessageStore = (*MemStore)(nil)
@@ -1153,4 +1157,38 @@ func cloneMessage(m Message) Message {
 func cloneEvent(e Event) Event {
 	e.Data = cloneRaw(e.Data)
 	return e
+}
+
+// LatestSummary implements SummaryStore.
+func (s *MemStore) LatestSummary(_ context.Context, owner OwnerKey, conversationID string) (Summary, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, err := s.ownedConversationLocked(owner, conversationID)
+	if err != nil {
+		return Summary{}, false, err
+	}
+	if rec.summary == nil {
+		return Summary{}, false, nil
+	}
+	return *rec.summary, true, nil
+}
+
+// PutSummary implements SummaryStore.
+func (s *MemStore) PutSummary(_ context.Context, owner OwnerKey, sum Summary, prevThrough string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, err := s.ownedConversationLocked(owner, sum.ConversationID)
+	if err != nil {
+		return false, err
+	}
+	current := ""
+	if rec.summary != nil {
+		current = rec.summary.ThroughMessageID
+	}
+	if current != prevThrough {
+		return false, nil
+	}
+	stored := sum
+	rec.summary = &stored
+	return true, nil
 }
