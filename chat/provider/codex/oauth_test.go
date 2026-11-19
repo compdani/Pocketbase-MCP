@@ -278,6 +278,28 @@ func TestListModelsSkipsHidden(t *testing.T) {
 	}
 }
 
+func TestListModelsReadsReasoningLevels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[
+			{"slug":"gpt-5-codex","supported_reasoning_levels":[{"effort":"low","description":"fast"},{"effort":"medium"},{"effort":"high"}]},
+			{"slug":"plain","supported_reasoning_levels":["minimal","xhigh"]},
+			{"slug":"none"}
+		]}`))
+	}))
+	defer srv.Close()
+	models, err := ListModels(context.Background(), nil, srv.URL, "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, m := range models {
+		got[m.Slug] = strings.Join(m.Efforts, ",")
+	}
+	if got["gpt-5-codex"] != "low,medium,high" || got["plain"] != "minimal,xhigh" || got["none"] != "" {
+		t.Fatalf("efforts = %v", got)
+	}
+}
+
 // A loopback goroutine from an abandoned attempt must not fail a newer one
 // when its listener is closed.
 func TestManagerStaleLoopbackDoesNotFailNewAttempt(t *testing.T) {

@@ -69,6 +69,14 @@ picker's value to `{ provider, model }` on `send()`. A choice id is opaque;
 `agent-panel` receives labelled objects and emits the chosen id. Without a
 catalog the old `models` strings and a plain `model` value still work.
 
+A choice may list `efforts` (reasoning effort levels, lowest first).
+`send(text, { effort: 'high' })` sends one with the turn, but only when the
+resolved choice lists it; otherwise it is dropped and the model's default
+applies. The agent-panel binding adds a "Reasoning effort" entry to the
+element's options menu while the selected model has efforts ("Model default"
+sends none), keeps any options the host set itself, and passes the pick on
+each `agent-submit`. `effortOptionFromState(state, model)` returns that entry.
+
 ## API
 
 ### `ChatClient`
@@ -289,7 +297,7 @@ Events handled:
 
 | Element event | Action |
 |---|---|
-| `agent-submit` | `controller.send(text, { model, attachments })`, where `detail.model` is a choice id (or a model id) and `detail.attachments[].file` becomes the File list. Files are uploaded first; the event is cancelled so the chips survive until the turn is accepted, then they are removed. A failure keeps the chips (with an error state) and restores the draft. With no open conversation, one is created first (`options.autoCreate = false` disables that). |
+| `agent-submit` | `controller.send(text, { model, effort, attachments })`, where `detail.model` is a choice id (or a model id), `effort` is `detail.options.effort` and `detail.attachments[].file` becomes the File list. Files are uploaded first; the event is cancelled so the chips survive until the turn is accepted, then they are removed. A failure keeps the chips (with an error state) and restores the draft. With no open conversation, one is created first (`options.autoCreate = false` disables that). |
 | `agent-action` (`proposal-decision`) | `controller.decide(id, decision)`; the buttons in a proposal card emit this. A failure is shown in the panel's error banner. |
 | `agent-action` (`attachment-download`) | Downloads one attachment, for a host-drawn chip. |
 | `agent-reference-open` | Downloads an attachment chip (`type: 'attachment'`); other references are left to the host. |
@@ -299,6 +307,7 @@ Events handled:
 | `agent-new-conversation` | `controller.newConversation()`. |
 | `agent-delete-conversation` | `controller.remove(id)`. |
 | `agent-rename` | `controller.rename(activeId, title)`; cancelled when no conversation is open. |
+| `agent-model-change` | Repaints, so the options menu offers the newly selected model's efforts. |
 | `agent-load-more` | `controller.loadMore()`. Not emitted by agent-panel 0.3.x: draw your own button in the page's `sidebar-end` slot and dispatch it, or call `binding.loadMore()`. |
 
 Other `agent-action` kinds are ignored. Downloads use the `ChatClient` passed
@@ -313,7 +322,10 @@ helpers are exported for tests and custom hosts: `entriesFromState(state,
 { pendingText })`, `proposalEntryOf(proposal)`,
 `proposalEntriesFromState(state)`, `proposalErrorText(error)`,
 `errorText(error)`, `conversationsFromState(state)`,
-`modelsFromState(state)` and `isPageElement(element)`.
+`modelsFromState(state)`, `effortOptionFromState(state, model)` and
+`isPageElement(element)`. `errorText` maps the failure codes a failed turn
+records (`provider_error`, `max_steps`, `internal_error`, …) to plain
+language and never shows raw server text.
 
 ### `parseSSE` / reducer helpers
 

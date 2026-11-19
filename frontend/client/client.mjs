@@ -300,11 +300,12 @@ export class ChatClient {
    * with the same key can never create a second turn. `attachments` are upload
    * ids returned by uploadFile(); the server re-validates every reference.
    */
-  async submitTurn(conversationId, { text, provider, model, attachments, idempotencyKey, signal } = {}) {
+  async submitTurn(conversationId, { text, provider, model, effort, attachments, idempotencyKey, signal } = {}) {
     const key = idempotencyKey || newIdempotencyKey();
     const body = { text };
     if (provider !== undefined && provider !== '') body.provider = provider;
     if (model !== undefined && model !== '') body.model = model;
+    if (typeof effort === 'string' && effort !== '') body.effort = effort;
     if (Array.isArray(attachments) && attachments.length > 0) {
       body.attachments = attachments.map((id) => String(id));
     }

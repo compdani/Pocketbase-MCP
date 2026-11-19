@@ -70,6 +70,8 @@ export interface ChatTurn {
   /** Catalog provider id, absent for the legacy single-provider path. */
   provider?: string;
   model?: string;
+  /** Reasoning effort the turn asked for; absent means the model default. */
+  effort?: string;
   createdAt: string;
   updatedAt: string;
   error?: ChatTurnFailure | null;
@@ -175,6 +177,8 @@ export interface ChatModelChoice {
   default?: boolean;
   /** Canonical MIME types this choice can send. */
   attachmentTypes?: string[];
+  /** Reasoning efforts a turn may request, lowest first. Absent means none. */
+  efforts?: string[];
 }
 
 export interface ChatStatus {
@@ -234,6 +238,8 @@ export interface SubmitTurnOptions extends RequestOptions {
   /** Catalog provider id. Omit to use the default provider. */
   provider?: string;
   model?: string;
+  /** Reasoning effort, one of the choice's `efforts`. Omit for the model default. */
+  effort?: string;
   /** Upload ids returned by uploadFile(). */
   attachments?: string[];
   idempotencyKey?: string;

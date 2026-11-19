@@ -170,6 +170,16 @@ step.
 **History.** The model gets the last 50 stored messages, never splitting a
 tool call from its result.
 
+**Failures.** A failed turn records one of `provider_error` (the provider
+refused the request or its stream broke), `max_steps`, `timeout`,
+`auth_expired`, `interrupted` or `internal_error`, with a generic message.
+Provider text never reaches the transcript or the browser. Instead the runner
+logs one warning per failed turn (`chat: turn failed`) with the code, turn,
+conversation, provider id, model, effort and cause, through
+`RunnerConfig.Logger` (the adapters pass the app's logger, so it lands in the
+PocketBase log). Provider errors are already sanitized: credentials removed and
+length bounded.
+
 ## 4. Ownership and storage
 
 Every record is keyed by namespace, mount, auth collection ID, user ID and
@@ -359,6 +369,15 @@ model, otherwise the unique provider that does. The resolved pair is stored on
 the turn (`provider` is absent on older turns). A turn is resolved once, so a
 catalog change never switches a running turn to another provider.
 
+**Reasoning effort.** A choice lists the efforts its model accepts in
+`efforts` (lowest first, from `none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`), and a turn may name one with `"effort": "high"`. It is stored on the
+turn and sent as `reasoning_effort` (Chat Completions) or `reasoning.effort`
+(Responses and the Codex plan route). An effort the resolved choice does not
+list is `400 invalid_request`, never a failed turn; omitting it uses the
+model's default. Anthropic models take none (extended thinking is not wired
+up). The legacy single-provider path advertises no efforts.
+
 Attachment types are listed at two levels. `limits.attachmentTypes` is what
 `POST /uploads` accepts: the union over every ready provider. Each choice's
 `attachmentTypes` is what that model can actually read, and a turn whose
@@ -401,6 +420,14 @@ skips entries whose `visibility` is set and is not `list`; Anthropic uses
 explicit allowlist (auto-populated when a provider is created with no models,
 or after Codex sign-in), so a chat page load never fans out to provider APIs
 and a gateway cannot silently widen the picker.
+
+Each model may carry `efforts`. Codex fills them from the plan's
+`supported_reasoning_levels`, as does any `/models` list that includes that
+field. Otherwise OpenAI-compatible entries get `low`/`medium`/`high` for the
+`gpt-5` family (except chat-tuned ids) and the `o1`/`o3`/`o4` series, ignoring a
+gateway prefix such as `openai/`, and nothing for other ids. An administrator
+can set `efforts` per model in `models` on create or `PATCH`; a refresh that
+discovers none for a model keeps the configured ones.
 
 ### Codex plan sign-in
 

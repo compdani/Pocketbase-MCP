@@ -211,6 +211,9 @@ type chatRequest struct {
 	Stream        bool           `json:"stream"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 	MaxTokens     int            `json:"max_tokens,omitempty"`
+	// ReasoningEffort is Chat Completions' reasoning_effort for reasoning
+	// models (gpt-5, o-series).
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type streamOptions struct {
@@ -276,10 +279,11 @@ func (p *Provider) buildBody(req provider.Request) ([]byte, error) {
 	}
 
 	payload := chatRequest{
-		Model:         req.Model,
-		Messages:      msgs,
-		Stream:        true,
-		StreamOptions: &streamOptions{IncludeUsage: true},
+		Model:           req.Model,
+		Messages:        msgs,
+		Stream:          true,
+		StreamOptions:   &streamOptions{IncludeUsage: true},
+		ReasoningEffort: req.ReasoningEffort,
 	}
 	if req.MaxOutputTokens > 0 {
 		payload.MaxTokens = req.MaxOutputTokens

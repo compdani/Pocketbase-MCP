@@ -100,6 +100,7 @@ const (
 	chatFieldActiveSlot      = "activeSlot"
 	chatFieldProvider        = "provider"
 	chatFieldModel           = "model"
+	chatFieldEffort          = "effort"
 	chatFieldLastSeq         = "lastSeq"
 	chatFieldDroppedBefore   = "droppedBefore"
 	chatFieldError           = "error"
@@ -396,7 +397,7 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 		{
 			name: s.turns,
 			// v1.3 adds the provider to a turn. Older fork stores gain it in place.
-			addFields: []string{chatFieldProvider},
+			addFields: []string{chatFieldProvider, chatFieldEffort},
 			fields: func() []core.Field {
 				fields := chatOwnerTextFields()
 				return append(fields,
@@ -407,6 +408,7 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 					chatTextField(chatFieldActiveSlot, chatSlotMaxLen, true),
 					chatTextField(chatFieldProvider, chatMaxTextLen, true),
 					chatTextField(chatFieldModel, chatMaxTextLen, true),
+					chatTextField(chatFieldEffort, chatMaxTextLen, true),
 					&core.NumberField{Name: chatFieldLastSeq, OnlyInt: true, System: true},
 					&core.NumberField{Name: chatFieldDroppedBefore, OnlyInt: true, System: true},
 					chatJSONTextField(chatFieldError),
@@ -766,6 +768,7 @@ func chatTurnFrom(rec *core.Record) chat.Turn {
 		IdempotencyKey: rec.GetString(chatFieldIdempotencyKey),
 		Provider:       rec.GetString(chatFieldProvider),
 		Model:          rec.GetString(chatFieldModel),
+		Effort:         rec.GetString(chatFieldEffort),
 		CreatedAt:      rec.GetDateTime(chatFieldCreatedAt).Time(),
 		UpdatedAt:      rec.GetDateTime(chatFieldUpdatedAt).Time(),
 	}
@@ -1349,6 +1352,7 @@ func (s *ChatStore) CreateTurn(ctx context.Context, owner chat.OwnerKey, t chat.
 		rec.Set(chatFieldActiveSlot, t.ConversationID)
 		rec.Set(chatFieldProvider, t.Provider)
 		rec.Set(chatFieldModel, t.Model)
+		rec.Set(chatFieldEffort, t.Effort)
 		rec.Set(chatFieldLastSeq, int64(0))
 		rec.Set(chatFieldDroppedBefore, int64(0))
 		if err := chatSetJSON(rec, chatFieldError, nil); err != nil {

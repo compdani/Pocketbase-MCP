@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -189,6 +190,7 @@ type turnJob struct {
 	provider       provider.Provider
 	providerID     string
 	model          string
+	effort         string
 	tools          ToolExecutor
 	deadline       time.Time
 	done           chan struct{}
@@ -339,6 +341,9 @@ type SubmitOptions struct {
 	// IdempotencyKey deduplicates a submission whose response was lost. An
 	// empty key means the submission is not deduplicated.
 	IdempotencyKey string
+	// Effort asks a reasoning model for this effort (one of the resolved
+	// choice's Efforts). Empty means the model's default.
+	Effort string
 	// Provider selects a catalog provider. Empty means the default provider,
 	// or the legacy single provider when no router is configured.
 	Provider string
@@ -389,11 +394,16 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 	if err != nil {
 		return Turn{}, false, err
 	}
+	effort := strings.TrimSpace(opts.Effort)
+	if effort != "" && !slices.Contains(resolved.Choice.Efforts, effort) {
+		return Turn{}, false, ErrEffortUnsupported
+	}
 	turn, created, err := r.cfg.Store.CreateTurn(ctx, owner, Turn{
 		ConversationID: conversationID,
 		IdempotencyKey: opts.IdempotencyKey,
 		Provider:       resolved.Choice.Provider,
 		Model:          resolved.Model,
+		Effort:         effort,
 	})
 	if err != nil {
 		return Turn{}, false, err
@@ -435,6 +445,7 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 		provider:       resolved.Provider,
 		providerID:     resolved.Choice.Provider,
 		model:          resolved.Model,
+		effort:         effort,
 		tools:          opts.Tools,
 		deadline:       opts.Deadline,
 		done:           make(chan struct{}),
@@ -1184,6 +1195,9 @@ func (r *Runner) failJob(j *turnJob, code string, cause error) {
 		"provider", j.providerID,
 		"model", j.model,
 	}
+	if j.effort != "" {
+		attrs = append(attrs, "effort", j.effort)
+	}
 	if cause != nil {
 		attrs = append(attrs, "error", cause.Error())
 	}
@@ -1275,10 +1289,11 @@ func (r *Runner) buildRequest(ctx context.Context, j *turnJob) (provider.Request
 		}
 	}
 	return provider.Request{
-		Model:    j.model,
-		System:   r.cfg.System,
-		Messages: messages,
-		Tools:    defs,
+		Model:           j.model,
+		System:          r.cfg.System,
+		Messages:        messages,
+		Tools:           defs,
+		ReasoningEffort: j.effort,
 	}, nil
 }
 

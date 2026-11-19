@@ -26,6 +26,13 @@ type responsesRequest struct {
 	Tools        []any  `json:"tools,omitempty"`
 	Stream       bool   `json:"stream"`
 	Store        bool   `json:"store"`
+	// Reasoning carries the effort for reasoning models; nil leaves the
+	// model's default.
+	Reasoning *responsesReasoning `json:"reasoning,omitempty"`
+}
+
+type responsesReasoning struct {
+	Effort string `json:"effort"`
 }
 
 type responsesInputText struct {
@@ -88,6 +95,9 @@ func (p *Provider) buildResponsesBody(req provider.Request) ([]byte, error) {
 		Input:        input,
 		Stream:       true,
 		Store:        false,
+	}
+	if req.ReasoningEffort != "" {
+		payload.Reasoning = &responsesReasoning{Effort: req.ReasoningEffort}
 	}
 	if len(req.Tools) > 0 {
 		tools := make([]any, 0, len(req.Tools))

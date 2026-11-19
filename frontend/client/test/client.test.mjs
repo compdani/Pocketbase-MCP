@@ -156,6 +156,15 @@ test('submitTurn sends an Idempotency-Key and reuses an explicit one', async () 
   assert.deepEqual(JSON.parse(fetch.calls[1].body), { text: 'again', model: 'm1' });
 });
 
+test('submitTurn sends a reasoning effort only when one is named', async () => {
+  const fetch = fakeFetch(() => jsonResponse({ turn, created: true }, 202));
+  const client = new ChatClient({ baseUrl: 'https://api.test', getToken: () => 't', fetch });
+  await client.submitTurn('c1', { text: 'think', model: 'gpt-5', effort: 'high' });
+  await client.submitTurn('c1', { text: 'default', model: 'gpt-5', effort: '' });
+  assert.deepEqual(JSON.parse(fetch.calls[0].body), { text: 'think', model: 'gpt-5', effort: 'high' });
+  assert.deepEqual(JSON.parse(fetch.calls[1].body), { text: 'default', model: 'gpt-5' });
+});
+
 test('newIdempotencyKey produces distinct UUIDs', () => {
   const keys = new Set(Array.from({ length: 50 }, () => newIdempotencyKey()));
   assert.equal(keys.size, 50);
