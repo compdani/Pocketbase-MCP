@@ -377,6 +377,17 @@ test('errorText maps protocol codes to plain language', () => {
   assert.match(errorText({ code: 'internal', message: 'panic: secret stack' }), /server/);
 });
 
+test('errorText explains the failure codes a failed turn records', () => {
+  // chat/runner.go: provider_error, max_steps, internal_error. They used to
+  // fall through to the generic line.
+  assert.match(errorText({ code: 'provider_error', message: 'The model request failed.' }), /provider refused/i);
+  assert.match(errorText({ code: 'max_steps', message: 'The turn exceeded the maximum number of steps.' }), /too many steps/i);
+  assert.match(errorText({ code: 'internal_error', message: 'The turn failed.' }), /server/);
+  for (const code of ['provider_error', 'max_steps', 'internal_error']) {
+    assert.notEqual(errorText({ code }), 'Something went wrong. Try again.');
+  }
+});
+
 test('errorText recognises a lost network and never echoes server internals', () => {
   assert.match(errorText({ code: 'error', message: 'The server could not be reached.' }), /reach the server/);
   assert.match(errorText({ code: 'error', message: 'No event or heartbeat for 45000ms.' }), /too long/);
