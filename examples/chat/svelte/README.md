@@ -31,7 +31,7 @@ npm run build   # production build
 
 `agent-panel` is a dependency installed by `npm install` from
 [github.com/compdani/agent-panel](https://github.com/compdani/agent-panel),
-pinned to `v0.5.0` in `package.json`. The chat client is this repo's own
+pinned to `v0.5.1` in `package.json`. The chat client is this repo's own
 code, which `vite.config.js` maps to folders on disk:
 
 | Import | Resolves to |

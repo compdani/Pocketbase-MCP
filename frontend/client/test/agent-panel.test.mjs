@@ -575,11 +575,16 @@ test('agent-submit with autoCreate false reports an error instead of sending', a
   assert.notEqual(element.error, '');
 });
 
-test('agent-stop stops the controller', async () => {
+test('agent-stop stops a running turn, and nothing else', async () => {
   const controller = makeController(stateOf());
   const element = new FakeElement();
   bindAgentPanel(element, controller);
 
+  element.fire('agent-stop', null);
+  await tick();
+  assert.deepEqual(controller.calls, [], 'no turn is running: nothing to cancel');
+
+  controller.set({ running: true, turn: { turnId: 't1', state: 'running' } });
   element.fire('agent-stop', null);
   await tick();
   assert.deepEqual(controller.calls, [{ method: 'stop' }]);
@@ -1362,3 +1367,68 @@ function deferredOf() {
   });
   return { promise, resolve };
 }
+
+
+test('a second submit is refused while the first is still on its way', async () => {
+  const controller = makeController(stateOf());
+  const element = new FakeElement();
+  const results = [];
+  bindAgentPanel(element, controller, { onSend: (r) => results.push([r.status, r.code]) });
+  const gate = deferredOf();
+  const sent = [];
+  controller.send = async (text) => {
+    sent.push(text);
+    return gate.promise;
+  };
+  element.fire('agent-submit', { text: 'first', attachments: [], references: [], model: '', options: {} });
+  assert.equal(element.running, true, 'the element refuses submits itself meanwhile');
+  const second = element.fire('agent-submit', { text: 'second', attachments: [], references: [], model: '', options: {} });
+  assert.equal(second.defaultPrevented, true);
+  gate.resolve({ turn: { id: 't1', state: 'queued' }, created: true });
+  await tickAll();
+  assert.deepEqual(sent, ['first']);
+  assert.deepEqual(results, [['failed', 'busy'], ['accepted', undefined]]);
+  assert.equal(element.running, false);
+});
+
+test('a failed send puts the message and its references back', async () => {
+  const controller = makeController(stateOf());
+  const element = new FakeElement();
+  bindAgentPanel(element, controller);
+  controller.send = async () => {
+    controller.set({ error: { code: 'turn_refused', message: 'Pick a list.' } });
+    return null;
+  };
+  const refs = [{ type: 'list', id: 'l1', label: 'Groceries' }];
+  element.references = [];
+  element.draft = '';
+  element.fire('agent-submit', { text: 'add milk', attachments: [], references: refs, fromDraft: true, model: '', options: {} });
+  await tickAll();
+  assert.equal(element.draft, 'add milk');
+  assert.deepEqual(element.references, refs);
+
+  // Words typed meanwhile are never clobbered, and restoreDraft: false opts out.
+  const other = new FakeElement();
+  bindAgentPanel(other, controller, { restoreDraft: false });
+  other.draft = '';
+  other.fire('agent-submit', { text: 'x', attachments: [], references: [], fromDraft: true, model: '', options: {} });
+  await tickAll();
+  assert.equal(other.draft, '');
+});
+
+test('the composer is disabled while no provider is set up', () => {
+  const controller = makeController(stateOf({ features: { ready: false, proposals: false, uploads: false } }));
+  const element = new FakeElement();
+  bindAgentPanel(element, controller);
+  assert.equal(element.disabled, true);
+  assert.match(element.error, /isn't set up/);
+  controller.set({ features: { ready: true, proposals: false, uploads: false } });
+  assert.equal(element.disabled, false);
+  assert.equal(element.error, '');
+
+  // A composer the host disabled stays disabled.
+  const hostDisabled = new FakeElement();
+  hostDisabled.disabled = true;
+  bindAgentPanel(hostDisabled, makeController(stateOf({ features: { ready: true } })));
+  assert.equal(hostDisabled.disabled, true);
+});
