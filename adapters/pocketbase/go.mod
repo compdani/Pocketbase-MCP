@@ -5,8 +5,8 @@ go 1.27
 require (
 	ganigeorgiev.com/pocketbase/dbx v1.13.0
 	ganigeorgiev.com/pocketbase/pocketbase v0.41.1
-	github.com/compdani/pocketbase-mcp v0.1.7
-	github.com/compdani/pocketbase-mcp/auth/stockoauth v0.1.7
+	github.com/compdani/pocketbase-mcp v0.1.8
+	github.com/compdani/pocketbase-mcp/auth/stockoauth v0.1.8
 )
 
 require (
