@@ -1206,3 +1206,18 @@ test('refreshContext reads the open conversation and ignores failures', async ()
   assert.equal(controller.state.context.tokens, 1234);
   assert.equal(controller.state.error, null);
 });
+
+test('a refused approval adopts the pending proposal so it can be approved again', async () => {
+  const client = makeClient();
+  const controller = await openedWith(client, [proposal()]);
+  client.decideProposal = async () => {
+    const err = new ChatApiError(422, 'refused', 'The subject line is required.');
+    err.proposal = proposal({ state: 'pending', revision: 3, failure: 'The subject line is required.' });
+    throw err;
+  };
+  const result = await controller.decide('p1', 'approve');
+  assert.equal(result.error.code, 'refused');
+  assert.equal(controller.state.proposals[0].state, 'pending');
+  assert.equal(controller.state.proposals[0].revision, 3);
+  assert.equal(controller.state.error, null);
+});

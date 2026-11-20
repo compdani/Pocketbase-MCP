@@ -16,6 +16,7 @@ import {
   isPageElement,
   modelsFromState,
   proposalEntriesFromState,
+  proposalErrorText,
   proposalEntryOf,
   registerProposalEntry,
   CONTEXT_MARKER_TYPE,
@@ -727,8 +728,11 @@ test('a pending proposal maps to an entry with plain words and buttons', () => {
     error: '',
     status: 'Waiting for your approval.',
     detail: '',
+    warnings: [],
     canDecide: true,
   });
+  const warned = proposalEntryOf(proposalOf({ warnings: [' The workflow has no trigger ', '', 7] }));
+  assert.deepEqual(warned.warnings, ['The workflow has no trigger']);
 });
 
 test('every proposal state has a distinct, honest line', () => {
@@ -1111,4 +1115,18 @@ test('entriesFromState marks where the summary ends', () => {
 test('the new failure codes have plain text', () => {
   assert.match(errorText({ code: 'context_too_long' }), /too long for the selected model/);
   assert.match(errorText({ code: 'too_soon' }), /moments ago/);
+});
+
+test('provider failure kinds have actionable text', () => {
+  assert.match(errorText({ code: 'usage_limit' }), /usage limit was reached/);
+  assert.match(errorText({ code: 'provider_auth' }), /rejected its credentials/);
+  assert.match(errorText({ code: 'output_limit' }), /cut off/);
+  assert.match(errorText({ code: 'rate_limited' }), /Too many requests/);
+});
+
+test('a refused approval reads as fixable', () => {
+  assert.equal(
+    proposalErrorText({ code: 'refused', message: 'The subject line is required.' }),
+    'The subject line is required. Nothing was saved; the change is waiting for your decision again.',
+  );
 });

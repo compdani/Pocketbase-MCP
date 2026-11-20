@@ -168,6 +168,9 @@ message.
 | `getConversation(id, { limit, cursor })` | `GET /conversations/{id}` |
 | `renameConversation(id, title)` | `PATCH /conversations/{id}` |
 | `deleteConversation(id)` | `DELETE /conversations/{id}` |
+| `getContext(id)` | `GET /conversations/{id}/context` |
+| `compactConversation(id)` | `POST /conversations/{id}/compact` |
+| `importConversation({ sourceId, title, createdAt, messages })` | `POST /conversations/actions/import` |
 | `submitTurn(id, { text, provider, model, attachments, idempotencyKey })` | `POST /conversations/{id}/turns` |
 | `getTurn(id)` | `GET /turns/{id}` |
 | `cancelTurn(id)` | `POST /turns/{id}/cancel` |
@@ -214,9 +217,11 @@ const { proposal, replayed, error } = await chat.decide('proposal-id', 'approve'
 if (error) renderConflict(proposal, error);
 ```
 
-`decide()` uses the revision currently in state. On a 409 it adopts
-`err.proposal`, records the message on that entry (`proposal.error`) and resolves
-with `error` set; the rest of the view is untouched. Every other failure throws.
+`decide()` uses the revision currently in state. On a 409, or a 422 `refused`
+(the tool refused the approved change before writing anything, and the
+proposal is pending again), it adopts `err.proposal`, records the message on
+that entry (`proposal.error`) and resolves with `error` set; the rest of the
+view is untouched. Every other failure throws.
 
 `reportOutcome(proposalId, { status, editorRevision, hunks, message })` records
 what a browser editor did with an approved editor proposal. It is an
@@ -384,7 +389,7 @@ binding registers with `defineEntry()`:
 { id, type: 'notice', content, proposalId?, state?, tool?, isError? }
 {
   id, type: 'proposal', proposalId, tool, summary, state, location, revision,
-  error, status, detail, canDecide,
+  error, status, detail, warnings, canDecide,
 }
 ```
 
