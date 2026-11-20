@@ -1337,3 +1337,20 @@ test('an early send resolves its model only after /status, also after an account
   assert.equal(submit.options.model, 'm1');
   assert.equal(submit.options.effort, 'high');
 });
+
+test('sending is true from the send() call until the turn is accepted', async () => {
+  const client = makeClient();
+  client.detailResult = detail(conversation('c1'), []);
+  const controller = new ChatController({ client });
+  await controller.init();
+  await controller.open('c1');
+  const gate = deferredValue();
+  client.submitTurn = async () => gate.promise;
+  const sending = controller.send('hi');
+  assert.equal(controller.state.sending, true, 'set synchronously');
+  gate.resolve({ turn: turn('queued'), created: true });
+  await sending;
+  await tick();
+  assert.equal(controller.state.sending, false);
+  await settle(controller);
+});

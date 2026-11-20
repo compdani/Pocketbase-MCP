@@ -110,7 +110,7 @@ each `agent-submit`. `effortOptionFromState(state, model)` returns that entry.
 ## Context window
 
 When the server manages the model's context window (`features.contextManagement`,
-see [chat.md section 11](../../docs/chat.md#11-context-window-and-summaries)),
+see [chat.md section 11](https://github.com/compdani/pocketbase-mcp/blob/master/docs/chat.md#11-context-window-and-summaries)),
 `state.context` is `{ tokens, window, estimated, summarizedThrough,
 summarizedAt, compacting, canCompact }`. It comes with the conversation on
 `open()`, is refreshed after every turn, and is null for a draft or an older
@@ -323,8 +323,8 @@ render, instead of making every consumer walk `messages[].parts` itself.
 
 ### `bindAgentPanel` / entry mapping
 
-> **Requires agent-panel v0.4.0 or later; v0.5.0 recommended.** Install it with
-> `npm install github:compdani/agent-panel#v0.5.0`. 0.4.0 adds the panel's
+> **Requires agent-panel v0.4.0 or later; v0.5.1 recommended.** Install it with
+> `npm install github:compdani/agent-panel#v0.5.1`. 0.4.0 adds the panel's
 > conversation switcher (`conversations-menu`, with delete), the built-in
 > "Load more" (`has-more` / `agent-load-more`), and the panel's
 > `conversations` / `active` properties that the list sync writes. With 0.3.x,
@@ -382,7 +382,8 @@ On every controller `change` it writes:
 | Property | Value |
 |---|---|
 | `entries` | The transcript, the live turn, notices and proposals, in agent-panel's entry shape (below). |
-| `running` | `state.running`. |
+| `running` | `state.running`, or a submit still on its way (creating the conversation, uploading, submitting). |
+| `disabled` | Set while `features.ready` is false (only when the binding set it; see below). |
 | `error` | A plain-language line mapped from `state.error` (and a failed turn's error). Raw server messages are never shown. |
 | `models` | `state.models`, for the model menu. |
 | `no-attachments`, `accept`, `max-file-size`, `max-files` | Attachment attributes mirrored from `/status` once it answers; `no-attachments` when uploads are off or no type is accepted. |
@@ -461,6 +462,20 @@ reports `failed` with code `attachment_text_required` or
 `attachments_unsupported`. Nothing is reported after `unbind()`. A new
 submit clears the previous banner and hides the last error and the last
 turn's failure while the new message is on its way.
+
+From a submit until the server accepts the turn (or the send fails), the
+element counts as `running`, so it refuses another submit itself; one that
+still arrives is reported as `failed` with code `busy` and never sent. The
+controller has the same signal as `state.sending`, set synchronously by
+`send()`. After a submit fails or is refused before it was accepted, the
+binding puts the draft and its references back (unless something was typed
+meanwhile); `restoreDraft: false` turns that off. Stop does nothing until a
+turn is running.
+
+While `/status` reports `features.ready: false` (no model provider set up),
+the binding disables the composer and shows the `no_provider` line, and
+enables it again once a provider appears. A composer the host disabled stays
+disabled; `disableWhenNotReady: false` leaves the composer to the host.
 
 `options.errorText(code, text, error)` replaces any error line the binding
 shows, proposal cards included, for translations: return a string to use it, anything else keeps the

@@ -140,6 +140,10 @@ export interface AgentPanelLike extends EventTarget {
   active?: string;
   hasMore?: boolean;
   draft?: string;
+  /** The composer's reference chips (restored after a failed submit). */
+  references?: AgentReference[];
+  /** Disables the composer (set while `features.ready` is false). */
+  disabled?: boolean;
   /** agent-panel 0.5+: the composer's context ring. */
   contextUsage?: AgentContextUsage | null;
   setAttribute?(name: string, value: string): void;
@@ -203,12 +207,25 @@ export interface AgentPanelBindingOptions {
    * on the element as a bubbling `chat-send` event.
    */
   onSend?: (result: AgentSendResult) => void;
+  /**
+   * Put the message (draft and references) back after a submit that failed
+   * or was refused before the server accepted it. Defaults to true; never
+   * overwrites words typed meanwhile.
+   */
+  restoreDraft?: boolean;
+  /**
+   * Disable the composer, and show the `no_provider` line, while `/status`
+   * reports `features.ready: false`. Defaults to true; a composer the host
+   * disabled itself is never enabled by the binding.
+   */
+  disableWhenNotReady?: boolean;
 }
 
 /**
  * How one submit ended. `accepted`: the server took the turn. `refused`: the
  * host's Setup hook refused it (`turn_refused`). `failed`: anything else
- * (`code` says what, `message` is the line the binding shows). `cancelled`:
+ * (`code` says what, `message` is the line the binding shows; `busy` is a
+ * submit made while the previous one was still on its way). `cancelled`:
  * superseded before it finished (account switch, disposal).
  */
 export type AgentSendResult =
