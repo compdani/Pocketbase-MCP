@@ -89,6 +89,11 @@ export interface ChatEvent {
 }
 
 export interface ChatFeatures {
+  /**
+   * False while no model provider is set up: a turn would be refused with
+   * `no_provider`. Absent on servers before this field.
+   */
+  ready?: boolean;
   proposals: boolean;
   uploads: boolean;
   /** Turns accept a page context. */
@@ -236,6 +241,12 @@ export interface ChatConversationDetail {
    * the server serves proposals; absent means the feature is off.
    */
   proposals?: ChatProposal[];
+  /**
+   * The conversation's most recent decided proposals (at most 50), oldest
+   * first, so a reopened view can still show what a decision did. Present
+   * alongside `proposals` on servers that send it.
+   */
+  decidedProposals?: ChatProposal[];
   /** Present when the server manages the context window or summaries. */
   context?: ChatContextStatus;
 }

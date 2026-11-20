@@ -1221,3 +1221,119 @@ test('a refused approval adopts the pending proposal so it can be approved again
   assert.equal(controller.state.proposals[0].revision, 3);
   assert.equal(controller.state.error, null);
 });
+
+test('send reads the page context when it is called, before uploading', async () => {
+  const client = makeClient();
+  client.statusResult = { ...STATUS, features: { proposals: false, uploads: true, context: true } };
+  client.detailResult = detail(conversation('c1'), []);
+  client.submitResult = { turn: turn('queued'), created: true };
+  let route = '/list/1';
+  const order = [];
+  client.uploadFile = async (conversationId, file) => {
+    order.push('upload');
+    route = '/list/2'; // the person moved on while the upload ran
+    return { id: 'u1', conversationId, name: file.name, mime: 'text/plain', kind: 'text', size: 1, sha256: 'x', createdAt: 'x' };
+  };
+  const controller = new ChatController({
+    client,
+    context: () => {
+      order.push('context');
+      return { route };
+    },
+  });
+  await controller.init();
+  await controller.open('c1');
+  await controller.send('hi', { attachments: [new File(['a'], 'a.txt', { type: 'text/plain' })] });
+  await settle(controller);
+  const submit = client.calls.find((c) => c.method === 'submitTurn');
+  assert.deepEqual(submit.options.context, { route: '/list/1' });
+  assert.deepEqual(order, ['context', 'upload']);
+});
+
+test('a send made before /status answers keeps its page context', async () => {
+  const client = makeClient();
+  const status = deferredValue();
+  client.status = async () => status.promise;
+  client.detailResult = detail(conversation('c1'), []);
+  client.submitResult = { turn: turn('queued'), created: true };
+  const controller = new ChatController({ client, context: () => ({ route: '/early' }) });
+  const init = controller.init();
+  await controller.open('c1');
+  const sent = controller.send('early');
+  status.resolve({ ...STATUS, features: { proposals: false, uploads: false, context: true } });
+  await init;
+  await sent;
+  await settle(controller);
+  const submit = client.calls.find((c) => c.method === 'submitTurn');
+  assert.deepEqual(submit.options.context, { route: '/early' });
+});
+
+test('a new send clears the previous error before anything else', async () => {
+  const client = makeClient();
+  client.detailResult = detail(conversation('c1'), []);
+  const controller = new ChatController({ client });
+  await controller.init();
+  await controller.open('c1');
+  client.submitTurn = async () => {
+    throw new ChatApiError(503, 'no_provider', "AI isn't set up yet.");
+  };
+  await controller.send('one');
+  assert.equal(controller.state.error?.code, 'no_provider');
+  const gate = deferredValue();
+  const errors = [];
+  client.submitTurn = async () => {
+    errors.push(controller.state.error);
+    await gate.promise;
+    return { turn: turn('queued'), created: true };
+  };
+  const sending = controller.send('two');
+  await tick();
+  assert.deepEqual(errors, [null]);
+  gate.resolve();
+  await sending;
+  await settle(controller);
+});
+
+test('open keeps the server\'s decided proposals', async () => {
+  const client = makeClient();
+  client.statusResult = { ...STATUS, features: { proposals: true, uploads: false } };
+  const decided = { id: 'p9', conversationId: 'c1', tool: 'create_items', state: 'succeeded', revision: 2, result: { id: 'r1' } };
+  client.detailResult = { ...detail(conversation('c1'), [], null, []), decidedProposals: [decided] };
+  const controller = new ChatController({ client });
+  await controller.init();
+  await controller.open('c1');
+  assert.deepEqual(controller.state.decidedProposals, [decided]);
+  assert.deepEqual(controller.state.proposals, []);
+  controller.startDraft();
+  assert.deepEqual(controller.state.decidedProposals, []);
+});
+
+function deferredValue() {
+  let resolve;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+test('an early send resolves its model only after /status, also after an account switch', async () => {
+  const client = makeClient();
+  const choices = [{ id: 'a::m1', provider: 'a', model: 'm1', label: 'M1', efforts: ['high'] }];
+  client.detailResult = detail(conversation('c1'), []);
+  client.submitResult = { turn: turn('queued'), created: true };
+  const controller = new ChatController({ client, storageKey: accountA });
+  await controller.init();
+  const status = deferredValue();
+  client.status = async () => status.promise;
+  const switched = controller.setAccount(accountB);
+  await controller.open('c1');
+  const sent = controller.send('early', { model: 'a::m1', effort: 'high' });
+  status.resolve({ ...STATUS, choices, defaultChoice: 'a::m1' });
+  await switched;
+  await sent;
+  await settle(controller);
+  const submit = client.calls.find((c) => c.method === 'submitTurn');
+  assert.equal(submit.options.provider, 'a');
+  assert.equal(submit.options.model, 'm1');
+  assert.equal(submit.options.effort, 'high');
+});

@@ -7,8 +7,11 @@
 import type { ChatController, ChatControllerState, ChatProposalEntry } from './controller.mjs';
 import type {
   ChatClient,
+  ChatMessage,
+  ChatProposal,
   ChatProposalLocation,
   ChatProposalState,
+  ChatTurn,
   ChatTurnFailure,
 } from './client.mjs';
 
@@ -79,6 +82,8 @@ export interface AgentProposalEntry {
   /** The host's notes about the change, shown under it. */
   warnings: string[];
   canDecide: boolean;
+  /** The whole stored proposal (arguments, result, timestamps), for a host renderer. */
+  proposal: ChatProposal;
 }
 
 /** One framework-generated transcript note, drawn as a small system line. */
@@ -90,6 +95,10 @@ export interface AgentNoticeEntry {
   state?: string;
   tool?: string;
   isError?: boolean;
+  /** The decision's stored server result, when the notice carries one. */
+  result?: unknown;
+  /** The whole proposal, when the controller has it (decided ones included). */
+  proposal?: ChatProposal;
 }
 
 /** agent-panel `Entry`. */
@@ -176,7 +185,36 @@ export interface AgentPanelBindingOptions {
    * shows nothing.
    */
   contextUsage?: 'auto' | 'slot' | false;
+  /**
+   * Replace the binding's error lines (translations, say). Receives the code
+   * (see `errorCode()`, plus the binding's own `attachments_unsupported`,
+   * `attachment_text_required`, `upload_failed` and `download_unavailable`),
+   * the English line and the error; a non-empty string replaces the line.
+   */
+  errorText?: (code: string, text: string, error: unknown) => string | null | undefined;
+  /**
+   * Turn the page context a user message was stored with (StoreContext) into
+   * reference chips on that message. Chips need a `label` and a type other
+   * than 'attachment'; a click is the element's `agent-reference-open`.
+   */
+  contextReferences?: (context: Record<string, unknown>, message: ChatMessage) => AgentReference[] | null | undefined;
+  /**
+   * Called once per submit with how it ended; the same detail is dispatched
+   * on the element as a bubbling `chat-send` event.
+   */
+  onSend?: (result: AgentSendResult) => void;
 }
+
+/**
+ * How one submit ended. `accepted`: the server took the turn. `refused`: the
+ * host's Setup hook refused it (`turn_refused`). `failed`: anything else
+ * (`code` says what, `message` is the line the binding shows). `cancelled`:
+ * superseded before it finished (account switch, disposal).
+ */
+export type AgentSendResult =
+  | { status: 'accepted'; text: string; turn: ChatTurn | null; created: boolean }
+  | { status: 'failed' | 'refused'; text: string; code: string; error: unknown; message: string }
+  | { status: 'cancelled'; text: string };
 
 /** agent-panel 0.5 `ContextUsage`. */
 export interface AgentContextUsage {
@@ -218,6 +256,13 @@ export declare const PROPOSAL_ACTION: 'proposal-decision';
 /** The line shown under a proposal, keyed by its stored state. */
 export declare const PROPOSAL_STATE_TEXT: Readonly<Record<string, string>>;
 
+/**
+ * The code `errorText()` picks its line by: the error's own known code,
+ * 'network', 'timeout' or 'resync_required' from its message, else 'unknown';
+ * '' for no error.
+ */
+export declare function errorCode(error: AgentError | string | null | undefined): string;
+
 /** A plain-language message for a controller error; never raw server text. */
 export declare function errorText(error: AgentError | string | null | undefined): string;
 
@@ -225,11 +270,15 @@ export declare function errorText(error: AgentError | string | null | undefined)
 export declare function proposalErrorText(error: AgentError | string | null | undefined): string;
 
 /** One proposal as an agent-panel entry, or null when it has no id. Pure. */
-export declare function proposalEntryOf(proposal: ChatProposalEntry | null | undefined): AgentProposalEntry | null;
+export declare function proposalEntryOf(
+  proposal: ChatProposalEntry | null | undefined,
+  options?: { proposalErrorText?: (error: unknown) => string },
+): AgentProposalEntry | null;
 
 /** Every proposal in controller state, in order, as entries. Pure. */
 export declare function proposalEntriesFromState(
   state: Pick<ChatControllerState, 'proposals'> | null | undefined,
+  options?: { proposalErrorText?: (error: unknown) => string },
 ): AgentProposalEntry[];
 
 /** Draw one proposal card; returns null outside a browser. */
@@ -289,11 +338,17 @@ export declare function entriesFromState(
   state:
     | (Pick<ChatControllerState, 'messages' | 'turn' | 'running'> & {
       proposals?: ChatProposalEntry[];
+      decidedProposals?: ChatProposal[];
       context?: ChatControllerState['context'];
     })
     | null
     | undefined,
-  options?: { pendingText?: string },
+  options?: {
+    pendingText?: string;
+    contextReferences?: AgentPanelBindingOptions['contextReferences'];
+    /** Format a proposal card's error line (the binding passes its errorText override). */
+    proposalErrorText?: (error: unknown) => string;
+  },
 ): AgentEntry[];
 
 /** Copy controller state into the element and route its events back. */

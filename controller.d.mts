@@ -55,8 +55,9 @@ export interface ChatControllerOptions {
   sync?: ChatSyncOptions | false;
   /**
    * Reads the page context for each send (route, selection, editor revision).
-   * Called once per send, only when the server reports `features.context`;
-   * a `context` passed to send() wins.
+   * Called once per send, synchronously when send() is called (before any
+   * upload), unless the server is known not to take contexts; a `context`
+   * passed to send() wins. A send made before /status answered waits for it.
    */
   context?: (() => Record<string, unknown> | null | undefined | Promise<Record<string, unknown> | null | undefined>) | null;
 }
@@ -149,6 +150,11 @@ export interface ChatControllerState {
    * events. Terminal entries stay visible until the next open.
    */
   proposals: ChatProposalEntry[];
+  /**
+   * The conversation's recent decided proposals from the server (reopened
+   * views), for showing what a decision did. Never decidable.
+   */
+  decidedProposals: ChatProposal[];
   /** Uploaded attachments not yet sent, cleared on send/account switch. */
   pendingUploads: ChatUpload[];
   /** Live view of the current (or last) turn. */
@@ -308,10 +314,20 @@ export declare class ChatController extends EventTarget {
        */
       effort?: string;
       attachments?: Array<string | Blob | File>;
-      /** Page context for this send; overrides the controller's `context` option. */
-      context?: Record<string, unknown> | null;
+      /**
+       * Page context for this send (or a Promise of it, from readContext());
+       * overrides the controller's `context` option.
+       */
+      context?: Record<string, unknown> | null | Promise<Record<string, unknown> | null | undefined>;
     },
   ): Promise<ChatSubmitResult | null>;
+
+  /**
+   * Call the `context` provider now and return its value as a Promise
+   * (undefined without a provider). Read it before slow work that precedes
+   * send() and pass it as `options.context`.
+   */
+  readContext(): Promise<Record<string, unknown> | null | undefined> | undefined;
 
   /** Cancel on the server, then drop the local stream. */
   stop(): Promise<ChatControllerState>;
