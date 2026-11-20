@@ -410,22 +410,38 @@ func (s *Server) ChatStorage() (chat.Store, bool) {
 // authentication, reading the bearer token from the Authorization header the
 // same way /mcp does.
 //
-// Every method is registered because the surface uses GET, POST, PATCH and
-// DELETE; the bare prefix is mounted too so the handler answers it with its own
-// JSON not-found body instead of the router's.
+// The subtree is registered once per HTTP method, never as a method-less
+// route: Go's ServeMux panics when a method-less "/api/chat/" meets an app's
+// "GET /{path...}" catch-all (neither pattern is more specific), while
+// "GET /api/chat/" simply wins over it. PUT and OPTIONS are included so an
+// unsupported method still gets the handler's JSON 405 and a CORS preflight
+// still reaches the router's CORS middleware. The bare prefix is mounted too
+// so the handler answers it with its own JSON not-found body instead of the
+// router's.
 func (s *Server) registerChatRoutes(r *router.Router[*core.RequestEvent]) error {
 	if s.chat == nil {
 		return nil
 	}
-	for _, path := range []string{s.chat.prefix, s.chat.prefix + "/"} {
-		if r.HasRoute("", path) {
-			return fmt.Errorf("pocketbase: chat route %q conflicts with an existing route", path)
+	paths := []string{s.chat.prefix, s.chat.prefix + "/"}
+	for _, path := range paths {
+		for _, method := range append([]string{""}, chatRouteMethods...) {
+			if r.HasRoute(method, path) {
+				return fmt.Errorf("pocketbase: chat route %q conflicts with an existing route", path)
+			}
 		}
 	}
-	for _, path := range []string{s.chat.prefix, s.chat.prefix + "/"} {
-		r.Route("", path, s.handleChat)
+	for _, path := range paths {
+		for _, method := range chatRouteMethods {
+			r.Route(method, path, s.handleChat)
+		}
 	}
 	return nil
+}
+
+// chatRouteMethods are the methods the chat subtree is registered for. GET also
+// serves HEAD.
+var chatRouteMethods = []string{
+	http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions,
 }
 
 // handleChat hands the request to the chat handler unchanged.

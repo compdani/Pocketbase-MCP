@@ -3,12 +3,23 @@
 Status on 2026-11-19. Done, committed and covered by tests: the MCP server
 (milestones 1–5), chat v1.1 (read-only) and chat v1.2 (proposals, editor
 tools, uploads). The fork's OAuth branch is merged (pb-postgress PR #4) and
-pinned at `v0.41.6`. Chat v1.3 (provider catalog, OpenAI
+pinned at `v0.41.7` (PostgreSQL only; MySQL support was removed in that tag). Chat v1.3 (provider catalog, OpenAI
 Responses, ChatGPT/Codex plan sign-in) is implemented and has had one review
 pass. It still needs staging and a real Codex sign-in. v0.1.2 adds a log
 line for every failed chat turn (with the provider's sanitized reason), plain
 messages for failed-turn codes in the agent-panel binding, and per-turn
 reasoning effort.
+
+Unreleased, for List Pocket: `503 no_provider` and `features.ready` when no
+model provider is set up; decided proposals (`decidedProposals`) and outcome
+results on reopened conversations; `pbmcp.OutcomeUnknown` for a custom tool
+that can't tell whether it wrote; `ChatOptions.ToolTimeout`, with a
+`DecisionTimeout` longer than it refused; chat routes registered per HTTP
+method (an app's `GET /{path...}` catch-all no longer panics); and, in the
+browser client, the page context read when `send()` is called (and kept for
+a send made before `/status`), send outcomes (`chat-send` / `onSend`), a
+cleared error at the start of each send, the whole proposal on custom
+entries, `contextReferences` chips and `errorText` overrides.
 
 Unreleased (branch `pocketbase-v0.41`, for the app migrations): the stock
 adapter, stockoauth and stock example build against PocketBase v0.41.1 on
@@ -78,9 +89,6 @@ migrations.
 
 ## Fork (pb-postgress)
 
-- **MySQL has never been tested** for any of the fork changes, including the
-  chat collections, whose uniqueness design was made for MySQL. Run the fork
-  tests with `PB_TEST_DB_DRIVER=mysql` (needs a local MySQL or MariaDB).
 - **Data race in background request logging.** Async request-log writes race
   with shutdown. This repo's tests work around it; fix it in the fork.
 - **Optional:** make shutdown wait for background file deletions. That race

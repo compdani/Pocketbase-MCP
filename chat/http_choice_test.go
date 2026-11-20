@@ -211,3 +211,31 @@ func TestHTTPTurnReasoningEffort(t *testing.T) {
 		t.Fatalf("refused turns reached the provider %d time(s)", n)
 	}
 }
+
+// With no provider set up, /status says features.ready is false and a turn is
+// refused with its own code (not invalid_request), before any host hook runs.
+func TestHTTPNoProviderIsItsOwnState(t *testing.T) {
+	router := &fakeChoiceRouter{providers: map[string]provider.Provider{}}
+	f := newFixture(t, fixtureOptions{router: router})
+	status := decodeStatus(t, f.call(http.MethodGet, testPrefix+"/status", nil, nil).expect(http.StatusOK))
+	if status.Features.Ready {
+		t.Fatal("features.ready = true with no provider")
+	}
+	raw := f.call(http.MethodGet, testPrefix+"/status", nil, nil).expect(http.StatusOK)
+	if !strings.Contains(string(raw.body), `"ready":false`) {
+		t.Fatalf("/status omits ready:false: %s", raw.body)
+	}
+
+	conv := f.createConversation(nil)
+	res := f.call(http.MethodPost, testPrefix+"/conversations/"+conv.ID+"/turns", map[string]any{"text": "hello"}, nil).
+		expect(http.StatusServiceUnavailable)
+	if code := res.errorCode(); code != CodeNoProvider {
+		t.Fatalf("error code = %q, want %q", code, CodeNoProvider)
+	}
+
+	router.choices = []ModelChoice{{ID: ChoiceID("a", "m1"), Provider: "a", Model: "m1", Default: true}}
+	status = decodeStatus(t, f.call(http.MethodGet, testPrefix+"/status", nil, nil).expect(http.StatusOK))
+	if !status.Features.Ready {
+		t.Fatal("features.ready = false with a default choice")
+	}
+}

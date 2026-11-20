@@ -65,6 +65,18 @@ type ProposalExecutor interface {
 // proposal is recorded as unknown and never rerun automatically.
 var ErrOutcomeUnknown = errors.New("chat: outcome unknown")
 
+// OutcomeUnknownError is ErrOutcomeUnknown with a user-safe message from the
+// tool, recorded as the proposal's failure instead of UnknownOutcomeMessage.
+type OutcomeUnknownError struct {
+	Message string
+}
+
+// Error implements error.
+func (e OutcomeUnknownError) Error() string { return e.Message }
+
+// Is makes errors.Is(err, ErrOutcomeUnknown) true.
+func (e OutcomeUnknownError) Is(target error) bool { return target == ErrOutcomeUnknown }
+
 // ToolError is a user-safe tool failure: its Message may be shown to the model
 // (as the tool result) and in the tool.failed event. Any other error is
 // reported as the generic "Tool failed." so internal details, paths, tokens or

@@ -80,7 +80,8 @@ recovers from a previous crash (section 4) and mounts the API.
 | `Proposals` | Offer write tools as proposals a person must approve (section 5). Needs `Config.AllowWrites`, unless the only chat writes are editor tools. |
 | `AutoApprove` | Let tools marked `Approval: "auto"` run without review. Never relaxes `AllowWrites`, policies or PocketBase rules. |
 | `AllowArgumentEdits` | Let the reviewer edit a proposal's arguments before approving. |
-| `DecisionTimeout` | Time limit for running one approved proposal (default 30s). |
+| `DecisionTimeout` | Time limit for running one approved proposal (default 30s). An explicit value longer than the chat tool timeout is refused at startup: the tool would be cut off first. |
+| `ToolTimeout` | Time limit for one custom tool call made by chat (a turn's tool step or an approved proposal) when the tool sets no `Timeout` of its own. Default `Config.MaxToolTimeout`, the `/mcp` limit; set it to give chat its own. |
 | `Uploads` | Turn on file attachments (section 7). |
 | `MaxUploadBytes`, `MaxAttachmentsPerTurn`, `MaxUploadsPerConversation` | Upload limits (defaults 10 MiB, 5, 50). |
 | `MaxBodyBytes`, `MaxMessageChars`, `HeartbeatInterval` | Request size (64 KiB), message length (16,000 characters), SSE heartbeat (15s). |
@@ -92,8 +93,13 @@ recovers from a previous crash (section 4) and mounts the API.
 
 Startup refuses inconsistent settings: proposals without `AllowWrites` (when
 server writes are possible), proposals or uploads with a store or runner that
-can't support them, and a runner that uses a different store from the
-handler.
+can't support them, a runner that uses a different store from the handler,
+and a `DecisionTimeout` longer than the chat tool timeout.
+
+Both adapters register the chat prefix once per HTTP method (GET, POST, PUT,
+PATCH, DELETE, OPTIONS), never as a method-less route, so an app with its own
+`GET /{path...}` catch-all (an SPA fallback, say) keeps working: Go's
+`ServeMux` would otherwise refuse the two patterns as conflicting.
 
 ## 2. HTTP API
 
@@ -103,11 +109,11 @@ ever read from that header, never from a URL.
 
 | Route | Does |
 |---|---|
-| `GET /status` | Models, limits and which features are on |
+| `GET /status` | Models, limits and which features are on. `features.ready` is `false` while no model provider is set up |
 | `GET /conversations` | The caller's conversations, newest first (by creation), optionally by target. `updatedAt` is the last activity: a rename, a generated title or a new turn |
 | `POST /conversations` | Create one, optionally tied to a target record |
 | `POST /conversations/actions/import` | Import a thread the browser kept (`Imports` on; section 12) |
-| `GET /conversations/{id}` | Transcript plus open proposals, and `context` when the window is managed (section 11) |
+| `GET /conversations/{id}` | Transcript plus open proposals (`proposals`), the 50 most recent decided ones (`decidedProposals`, proposals on) and `context` when the window is managed (section 11) |
 | `GET /conversations/{id}/context` | How full the conversation's context is (section 11) |
 | `POST /conversations/{id}/compact` | Summarize the older messages now (summaries on; section 11) |
 | `PATCH /conversations/{id}` | Rename |
@@ -137,6 +143,11 @@ Routes for features that are off return 404. Another user's records also
 return 404, the same as missing ones, so nothing leaks. Errors are
 `{"error": {"code", "message"}}`; proposal conflicts add the stored
 `"proposal"` so the client can show its real state.
+
+A turn sent while no model provider is set up (no provider configured, or a
+catalog with no ready model) is `503 no_provider`, not `400
+invalid_request`. It is answered before the runner's `Setup` hook runs, and
+`/status` reports the same state ahead of time as `features.ready: false`.
 
 ## 3. Turns and streaming
 
@@ -351,6 +362,17 @@ editor proposals: pending → approved → applied | stale | failed | expired
 - `unknown` means it may or may not have applied: a timeout after the change
   was sent, or a crash before the result was saved. It is never retried
   automatically.
+- **May or may not have applied:** a custom tool's handler returns
+  `pbmcp.OutcomeUnknown(msg)` when it started writing and lost track (a
+  downstream call timed out, a commit didn't answer). The proposal ends
+  `unknown` with `msg` as its `failure`. Any other unexpected handler error
+  still counts as a definite `failed` ("Tool execution failed."), so return
+  `OutcomeUnknown` whenever the handler can't tell. On MCP it is an ordinary
+  tool error.
+- A reopened conversation returns its recent decided proposals as
+  `decidedProposals`, and each outcome notice in the transcript carries the
+  stored `result`, so a view can still show what a decision did (an "Open"
+  link to the record it created, say).
 - Proposals expire after 24 hours by default (`RunnerConfig.ProposalTTL`).
 
 **Editing arguments.** With `AllowArgumentEdits`, an approval may include new
@@ -642,9 +664,11 @@ browser package:
   proposals, uploads, limits, errors) with `send`, `stop`, `decide`, `attach`
   and an **editor adapter** (`snapshot`, `validatePatch`, `applyPatch`) that
   applies approved editor proposals and reports the outcome. Its `context`
-  option is a function read once per send for the page context, sent only
-  when the server reports `features.context`; `send(text, { context })`
-  overrides it.
+  option is a function read once per send for the page context, at the moment
+  `send()` is called (before any upload), and sent when the server reports
+  `features.context`; a send made before `/status` answers waits for it.
+  `send(text, { context })` overrides it, and `readContext()` reads it early
+  for a caller with slow work to do first.
 - `bindAgentPanel`: connects the controller to the `<agent-panel>` /
   `<agent-page>` web components: approve and reject buttons, outcome notes,
   attachment chips and composer limits taken from `/status`, and the
@@ -794,8 +818,7 @@ stores implement `chat.ImportStore`.
   `POST /conversations/actions/import` takes `{sourceId, title?, createdAt?,
   messages: [{role: "user" | "assistant", text, createdAt?}]}`, up to 8 MiB
   (`MaxImportBytes`). Each message must also fit the store's message limit:
-  4 MiB on stock PocketBase and on the fork with PostgreSQL, 60 KiB on the
-  fork with MySQL (whose `TEXT` column stops at 64 KiB). A larger one makes
+  4 MiB on stock PocketBase and on the fork. A larger one makes
   the import a `400` naming the message. Only user and assistant text is accepted, so a browser
   can't write tool results or notices. The client method is
   `client.importConversation(...)`.

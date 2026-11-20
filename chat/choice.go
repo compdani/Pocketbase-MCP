@@ -64,8 +64,9 @@ type ModelRouter interface {
 	SupportsAttachment(mimeType string) bool
 }
 
-// Errors returned by a ModelRouter. The HTTP layer maps all of them to a 400
-// invalid-request response; they never reach the model or the browser verbatim.
+// Errors returned by a ModelRouter. The HTTP layer maps ErrNoModelConfigured to
+// 503 no_provider and the others to a 400 invalid-request response; they never
+// reach the model or the browser verbatim.
 var (
 	// ErrNoModelConfigured reports that no provider or model is configured.
 	ErrNoModelConfigured = errors.New("chat: no model provider is configured")

@@ -59,6 +59,8 @@ const ERROR_TEXT = Object.freeze({
   conflict: 'This conversation is busy. Try again in a moment.',
   provider: 'The assistant could not answer this time. Try again.',
   internal: 'Something went wrong on the server. Try again.',
+  no_provider: "AI isn't set up yet. Ask an administrator to add a model provider.",
+  turn_refused: 'The message was not accepted here.',
   // Failure codes the runner records on a failed turn (chat/runner.go).
   provider_error: 'The AI provider refused the request. Try again, or ask an administrator to check the provider settings.',
   max_steps: 'This question needed too many steps. Try asking something narrower.',
@@ -86,6 +88,36 @@ const MESSAGE_HINTS = Object.freeze([
   [/no event or heartbeat|timed out|timeout/i, ERROR_TEXT.timeout],
   [/resync|reload the conversation/i, ERROR_TEXT.resync_required],
 ]);
+
+// Binding-only messages, by the code a host's `errorText` option receives.
+const LOCAL_TEXT = Object.freeze({
+  attachments_unsupported: ATTACHMENTS_UNSUPPORTED_TEXT,
+  attachment_text_required: 'A message with attachments still needs some text.',
+  upload_failed: 'The files could not be uploaded.',
+  download_unavailable: 'This attachment cannot be downloaded here.',
+});
+
+const HINT_CODES = Object.freeze(['network', 'timeout', 'resync_required']);
+
+/**
+ * The code `errorText()` picks its line by: the error's own code when the
+ * binding knows it, 'network', 'timeout' or 'resync_required' when only the
+ * message says so, and otherwise 'unknown'. '' for no error.
+ */
+export function errorCode(error) {
+  if (!error) return '';
+  if (typeof error === 'string') {
+    return Object.prototype.hasOwnProperty.call(ERROR_TEXT, error) ? error : 'unknown';
+  }
+  if (typeof error !== 'object') return 'unknown';
+  const code = typeof error.code === 'string' ? error.code.toLowerCase() : '';
+  if (Object.prototype.hasOwnProperty.call(ERROR_TEXT, code)) return code;
+  const message = typeof error.message === 'string' ? error.message : '';
+  for (let i = 0; i < MESSAGE_HINTS.length; i += 1) {
+    if (MESSAGE_HINTS[i][0].test(message)) return HINT_CODES[i];
+  }
+  return 'unknown';
+}
 
 /**
  * A user-facing message for a controller error (`{ code, message }`, an
@@ -310,6 +342,9 @@ const PROPOSAL_STATE_TONE = Object.freeze({
   stale: 'tone-warning',
 });
 
+/** The codes proposalErrorText() has its own line for. */
+const PROPOSAL_ERROR_CODES = new Set(['stale', 'expired', 'conflict', 'refused', 'not_found', 'editor_unavailable']);
+
 /** A plain-language line for a proposal error; never raw server text. */
 export function proposalErrorText(error) {
   if (!error) return '';
@@ -359,7 +394,7 @@ function proposalFailureText(proposal) {
  *
  * Pure: no DOM and no controller access.
  */
-export function proposalEntryOf(proposal) {
+export function proposalEntryOf(proposal, options = {}) {
   if (!proposal || typeof proposal !== 'object') return null;
   const id = proposal.id === undefined || proposal.id === null ? '' : String(proposal.id);
   if (id === '') return null;
@@ -379,22 +414,33 @@ export function proposalEntryOf(proposal) {
     state,
     location,
     revision: Number.isFinite(Number(proposal.revision)) ? Number(proposal.revision) : 0,
-    error: proposalErrorText(proposal.error),
+    error: typeof options.proposalErrorText === 'function'
+      ? options.proposalErrorText(proposal.error)
+      : proposalErrorText(proposal.error),
     status,
     detail: failure,
     warnings: Array.isArray(proposal.warnings)
       ? proposal.warnings.filter((w) => typeof w === 'string' && w.trim() !== '').map((w) => w.trim())
       : [],
     canDecide: state === 'pending',
+    // The whole stored proposal (arguments, result, timestamps), for a host's
+    // own renderer. The binding's own card reads only the fields above.
+    proposal: proposalData(proposal),
   };
 }
 
+/** A proposal as the server sent it, without the controller's own fields. */
+function proposalData(proposal) {
+  const { error: _error, ...data } = proposal;
+  return data;
+}
+
 /** Every proposal in controller state, in order, as entries. Pure. */
-export function proposalEntriesFromState(state) {
+export function proposalEntriesFromState(state, options = {}) {
   const list = state && Array.isArray(state.proposals) ? state.proposals : [];
   const entries = [];
   for (const proposal of list) {
-    const entry = proposalEntryOf(proposal);
+    const entry = proposalEntryOf(proposal, options);
     if (entry) entries.push(entry);
   }
   return entries;
@@ -411,19 +457,55 @@ function attachmentReferenceOf(part) {
   return reference;
 }
 
-function noticeEntryOf(message, part, messageIndex, partIndex) {
+function noticeEntryOf(message, part, messageIndex, partIndex, proposals) {
   const text = typeof part.text === 'string' ? part.text.trim() : '';
   if (text === '') return null;
   const messageKey = messageId(message, messageIndex);
-  return {
+  const proposalId = typeof part.proposalId === 'string' ? part.proposalId : '';
+  const entry = {
     id: `notice:${messageKey}:${partIndex}`,
     type: 'notice',
     content: text,
-    proposalId: typeof part.proposalId === 'string' ? part.proposalId : '',
+    proposalId,
     state: typeof part.state === 'string' ? part.state : '',
     tool: typeof part.tool === 'string' ? part.tool : '',
     isError: part.isError === true,
   };
+  // The stored server result of the decision, and the whole proposal when the
+  // controller has it (a reopened conversation gets the recent decided ones),
+  // so a host's notice renderer can still link to what the change created.
+  if (part.result !== undefined && part.result !== null) entry.result = part.result;
+  const proposal = proposalId !== '' ? proposals.get(proposalId) : undefined;
+  if (proposal) entry.proposal = proposalData(proposal);
+  return entry;
+}
+
+/** Every proposal the controller knows, decided ones included, by id. */
+function proposalsById(state) {
+  const byId = new Map();
+  for (const key of ['decidedProposals', 'proposals']) {
+    const list = state && Array.isArray(state[key]) ? state[key] : [];
+    for (const proposal of list) {
+      if (proposal && typeof proposal === 'object' && proposal.id) byId.set(String(proposal.id), proposal);
+    }
+  }
+  return byId;
+}
+
+/**
+ * The chips a host's `contextReferences` option makes of a stored page
+ * context, or []. A throwing or malformed hook shows no chips.
+ */
+function contextReferencesOf(hook, context, message) {
+  if (typeof hook !== 'function' || !context || typeof context !== 'object') return [];
+  let out;
+  try {
+    out = hook(context, message);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(out)) return [];
+  return out.filter((ref) => ref && typeof ref === 'object' && typeof ref.label === 'string' && ref.label !== '');
 }
 
 /**
@@ -443,6 +525,7 @@ function noticeEntryOf(message, part, messageIndex, partIndex) {
 export function entriesFromState(state, options = {}) {
   const messages = state && Array.isArray(state.messages) ? state.messages : [];
   const results = toolResultsOf(messages);
+  const proposals = proposalsById(state);
   const turn = state && state.turn && typeof state.turn === 'object' ? state.turn : null;
   const activeTurnId = turn && turn.turnId ? String(turn.turnId) : '';
   const running = state?.running === true;
@@ -481,7 +564,7 @@ export function entriesFromState(state, options = {}) {
     if (role === 'notice') {
       parts.forEach((part, partIndex) => {
         if (!part || typeof part !== 'object' || part.type !== 'proposal_outcome') return;
-        const notice = noticeEntryOf(message, part, index, partIndex);
+        const notice = noticeEntryOf(message, part, index, partIndex, proposals);
         if (notice) entries.push(notice);
       });
       continue;
@@ -524,6 +607,12 @@ export function entriesFromState(state, options = {}) {
       if (part.type === 'attachment') {
         const reference = attachmentReferenceOf(part);
         if (reference) references.push(reference);
+        continue;
+      }
+      if (part.type === 'context') {
+        // A stored page context (StoreContext) is data, never text: it only
+        // shows when the host maps it to chips.
+        references.push(...contextReferencesOf(options.contextReferences, part.result, message));
         continue;
       }
       if (part.type === 'tool_call') {
@@ -626,7 +715,7 @@ export function entriesFromState(state, options = {}) {
 
   // Proposals are conversation-level, so they follow the transcript. A decided
   // one stays until the next open, alongside the server's notice line.
-  entries.push(...proposalEntriesFromState(state));
+  entries.push(...proposalEntriesFromState(state, options));
 
   return entries;
 }
@@ -973,6 +1062,19 @@ function saveBlob(blob, name) {
  *   `contextUsage` (nothing on older versions), 'slot' also draws a small
  *   button into the `composer-actions` slot when the element has no
  *   `contextUsage` of its own, and false shows nothing.
+ * @param {(code: string, text: string, error: unknown) => string | null | undefined} [options.errorText]
+ *   Replace the binding's error lines (translations, say). It gets the code
+ *   (see `errorCode()`, plus the binding's own `attachments_unsupported`,
+ *   `attachment_text_required`, `upload_failed` and `download_unavailable`),
+ *   the English line and the error; a string replaces the line.
+ * @param {(context: object, message: object) => object[] | null} [options.contextReferences]
+ *   Turn the page context a user message was stored with (StoreContext) into
+ *   reference chips on that message. Return chips with a `label` and a type
+ *   other than 'attachment'; a click is the element's `agent-reference-open`
+ *   for the host to handle.
+ * @param {(result: SendResult) => void} [options.onSend] Called once per
+ *   submit with how it ended; the same detail is dispatched on the element as
+ *   a `chat-send` event.
  * @returns {{ unbind: () => void, refresh: () => void, loadMore: () => Promise<unknown> }}
  */
 export function bindAgentPanel(element, controller, options = {}) {
@@ -995,6 +1097,34 @@ export function bindAgentPanel(element, controller, options = {}) {
   let pendingConversationId = null;
   let localError = null; // a binding-only message (e.g. refused attachments)
   let dismissedError = null; // a state error the person closed
+  // The turn whose error was on screen when the current send started: its
+  // error is old news while the new message is on its way.
+  let staleTurnId = null;
+  // Likewise the controller error that was showing when it started; the
+  // controller clears it once the send gets going.
+  let staleStateError = null;
+
+  /** The line for an error, through the host's errorText option. */
+  function textFor(error, text = errorText(error), code = errorCode(error)) {
+    if (text === '' || typeof options.errorText !== 'function') return text;
+    try {
+      const custom = options.errorText(code, text, error);
+      return typeof custom === 'string' && custom !== '' ? custom : text;
+    } catch {
+      return text;
+    }
+  }
+
+  function localText(code) {
+    return textFor({ code }, LOCAL_TEXT[code], code);
+  }
+
+  function proposalText(error) {
+    const text = proposalErrorText(error);
+    if (text === '') return '';
+    const own = error && typeof error === 'object' && typeof error.code === 'string' ? error.code.toLowerCase() : '';
+    return textFor(error, text, PROPOSAL_ERROR_CODES.has(own) ? own : errorCode(error));
+  }
 
   const state = () => controller.state ?? {};
 
@@ -1008,10 +1138,11 @@ export function bindAgentPanel(element, controller, options = {}) {
     const snapshot = state();
 
     // Drop the optimistic user bubble once the transcript has the message, or
-    // once the person moved to another conversation.
+    // once the person moved to another conversation (or none, after an
+    // account switch).
     if (pendingText !== '') {
-      if (pendingConversationId && snapshot.activeConversationId
-        && String(snapshot.activeConversationId) !== String(pendingConversationId)) {
+      if (pendingConversationId && (!snapshot.activeConversationId
+        || String(snapshot.activeConversationId) !== String(pendingConversationId))) {
         pendingText = '';
       } else if (hasUserText(Array.isArray(snapshot.messages) ? snapshot.messages : [], pendingText.trim())) {
         pendingText = '';
@@ -1019,10 +1150,19 @@ export function bindAgentPanel(element, controller, options = {}) {
       }
     }
 
-    writeProperty(element, 'entries', entriesFromState(snapshot, { pendingText }));
+    writeProperty(element, 'entries', entriesFromState(snapshot, {
+      pendingText,
+      contextReferences: options.contextReferences,
+      proposalErrorText: proposalText,
+    }));
     writeProperty(element, 'running', snapshot.running === true);
 
-    const mapped = errorText(snapshot.error) || errorText(snapshot.turn && snapshot.turn.error);
+    const turn = snapshot.turn && typeof snapshot.turn === 'object' ? snapshot.turn : null;
+    if (staleTurnId !== null && (!turn || String(turn.turnId ?? '') !== staleTurnId)) staleTurnId = null;
+    const turnError = turn && staleTurnId === null ? turn.error : null;
+    if (staleStateError !== null && snapshot.error !== staleStateError) staleStateError = null;
+    const stateError = staleStateError === null ? snapshot.error : null;
+    const mapped = textFor(stateError) || textFor(turnError);
     const text = localError || mapped;
     if (text === '') {
       dismissedError = null;
@@ -1052,8 +1192,46 @@ export function bindAgentPanel(element, controller, options = {}) {
     }
   }
 
-  /** Send one message; resolves with whether the server accepted it. */
+  /** Tell the host how one submit ended (options.onSend and `chat-send`). */
+  function report(result) {
+    if (unbound) return;
+    if (typeof options.onSend === 'function') {
+      try {
+        options.onSend(result);
+      } catch {
+        // A host callback never breaks the binding.
+      }
+    }
+    if (typeof element.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+      element.dispatchEvent(new CustomEvent('chat-send', { detail: result, bubbles: true, composed: true }));
+    }
+  }
+
+  /** How a failed send ended: 'refused' by the host's Setup hook, else 'failed'. */
+  function failure(text, error) {
+    const own = error && typeof error === 'object' && typeof error.code === 'string' ? error.code : '';
+    const code = own !== '' && own !== 'error' ? own : errorCode(error) || 'unknown';
+    return {
+      status: code === 'turn_refused' ? 'refused' : 'failed',
+      text,
+      code,
+      error: error ?? null,
+      message: textFor(error) || errorText(error),
+    };
+  }
+
+  /**
+   * Send one message; resolves with its outcome (the `chat-send` detail).
+   * Every call reports it once: accepted, failed, refused or cancelled.
+   */
   async function deliver(text, model, attachments = [], effort = '') {
+    // The page context is read before anything slow (creating the
+    // conversation, uploading), so it describes the page the message was
+    // sent from.
+    const features = state().features;
+    const wantContext = !features || features.context === true;
+    const context = wantContext && typeof controller.readContext === 'function' ? controller.readContext() : undefined;
+    if (context && typeof context.catch === 'function') context.catch(() => {});
     try {
       let conversationId = state().activeConversationId;
       if (!conversationId) {
@@ -1068,7 +1246,10 @@ export function bindAgentPanel(element, controller, options = {}) {
           pendingText = '';
           pendingConversationId = null;
           paint();
-          return false;
+          const error = state().error;
+          const result = error ? failure(text, error) : { status: 'cancelled', text };
+          report(result);
+          return result;
         }
       }
       pendingConversationId = String(conversationId);
@@ -1077,14 +1258,37 @@ export function bindAgentPanel(element, controller, options = {}) {
       if (model) sendOptions.model = model;
       if (effort) sendOptions.effort = effort;
       if (attachments.length > 0) sendOptions.attachments = attachments;
-      await controller.send(text, Object.keys(sendOptions).length > 0 ? sendOptions : undefined);
-      return true;
+      if (context !== undefined) sendOptions.context = context;
+      const result = await controller.send(text, Object.keys(sendOptions).length > 0 ? sendOptions : undefined);
+      let outcome;
+      if (result && result.turn) {
+        outcome = { status: 'accepted', text, turn: result.turn, created: result.created !== false };
+      } else if (state().error) {
+        // The controller reported it (it never throws for a server answer).
+        outcome = failure(text, state().error);
+      } else if (result === null) {
+        // Superseded: the account changed, the controller was disposed or
+        // the person moved on before the send finished.
+        outcome = { status: 'cancelled', text };
+      } else {
+        // A controller that resolves without a turn (an older one, a double).
+        outcome = { status: 'accepted', text, turn: null, created: true };
+      }
+      if (outcome.status !== 'accepted') {
+        pendingText = '';
+        pendingConversationId = null;
+        paint();
+      }
+      report(outcome);
+      return outcome;
     } catch (err) {
       pendingText = '';
       pendingConversationId = null;
-      localError = proposalErrorText(err) || errorText(err);
+      localError = proposalText(err) || textFor(err);
       paint();
-      return false;
+      const outcome = failure(text, err);
+      report(outcome);
+      return outcome;
     }
   }
 
@@ -1152,8 +1356,9 @@ export function bindAgentPanel(element, controller, options = {}) {
       if (files.length > 0) {
         // The API requires text; keep the files and say why nothing was sent.
         if (typeof event.preventDefault === 'function') event.preventDefault();
-        localError = 'A message with attachments still needs some text.';
+        localError = localText('attachment_text_required');
         paint();
+        report({ status: 'failed', text: '', code: 'attachment_text_required', error: null, message: localError });
       }
       return;
     }
@@ -1161,15 +1366,22 @@ export function bindAgentPanel(element, controller, options = {}) {
     const features = state().features;
     if (files.length > 0 && features && features.uploads === false) {
       if (typeof event.preventDefault === 'function') event.preventDefault();
-      localError = ATTACHMENTS_UNSUPPORTED_TEXT;
+      localError = localText('attachments_unsupported');
       paint();
+      report({ status: 'failed', text, code: 'attachments_unsupported', error: null, message: localError });
       return;
     }
 
     const model = typeof detail.model === 'string' ? detail.model : '';
     const chosen = detail.options && typeof detail.options === 'object' ? detail.options[EFFORT_OPTION_ID] : '';
     const effort = typeof chosen === 'string' ? chosen : '';
+    // A new send starts clean: neither a banner from the last one nor the last
+    // turn's failure stays up while this one is on its way.
     localError = null;
+    dismissedError = null;
+    const previous = state().turn;
+    staleTurnId = previous && previous.turnId ? String(previous.turnId) : null;
+    staleStateError = state().error ?? null;
     pendingText = text;
     pendingConversationId = state().activeConversationId
       ? String(state().activeConversationId)
@@ -1190,8 +1402,8 @@ export function bindAgentPanel(element, controller, options = {}) {
       element.clearComposer({ draft: fromDraft, attachments: false });
     }
     setAttachmentState(element, items, { busy: true });
-    void deliver(text, model, files, effort).then((sent) => {
-      if (sent) {
+    void deliver(text, model, files, effort).then((outcome) => {
+      if (outcome.status === 'accepted') {
         for (const item of items) {
           const id = item && typeof item === 'object' ? item.id : '';
           if (typeof id === 'string' && id !== '' && typeof element.removeAttachment === 'function') {
@@ -1200,7 +1412,13 @@ export function bindAgentPanel(element, controller, options = {}) {
         }
         return;
       }
-      setAttachmentState(element, items, { error: localError || 'The files could not be uploaded.' });
+      if (outcome.status === 'cancelled') {
+        // Nothing failed: the view moved on. Leave the chips usable and the
+        // draft alone.
+        setAttachmentState(element, items, null);
+        return;
+      }
+      setAttachmentState(element, items, { error: localError || outcome.message || localText('upload_failed') });
       // Put the draft back so the person can retry without retyping; never
       // clobber words typed while the upload was running.
       if (fromDraft && element.draft === '') element.draft = text;
@@ -1213,8 +1431,10 @@ export function bindAgentPanel(element, controller, options = {}) {
   }
 
   function onErrorDismiss() {
-    dismissedError = localError || errorText(state().error)
-      || errorText(state().turn && state().turn.error);
+    const turn = state().turn;
+    const stateError = state().error;
+    dismissedError = localError || textFor(stateError !== staleStateError ? stateError : null)
+      || textFor(turn && String(turn.turnId ?? '') !== staleTurnId ? turn.error : null);
     localError = null;
     dismissedError = dismissedError || '';
   }
@@ -1229,7 +1449,7 @@ export function bindAgentPanel(element, controller, options = {}) {
     try {
       await controller.decide(proposalId, decision);
     } catch (err) {
-      localError = proposalErrorText(err) || errorText(err);
+      localError = proposalText(err) || textFor(err);
       paint();
     }
   }
@@ -1255,12 +1475,12 @@ export function bindAgentPanel(element, controller, options = {}) {
   function download(uploadId, reference) {
     const run = downloader();
     if (!run) {
-      localError = 'This attachment cannot be downloaded here.';
+      localError = localText('download_unavailable');
       paint();
       return;
     }
     void Promise.resolve(run(uploadId, reference)).catch((err) => {
-      localError = errorText(err);
+      localError = textFor(err);
       paint();
     });
   }

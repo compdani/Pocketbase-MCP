@@ -424,8 +424,13 @@ func (h *handler) recordOutcome(ctx context.Context, caller Caller, executing Pr
 		return h.cfg.Proposals.TransitionProposal(ctx, caller.Owner, id, from, revision,
 			ProposalStateFailed, ProposalUpdate{Failure: msg, ClearFailure: true})
 	}
+	failure := UnknownOutcomeMessage
+	var unknown OutcomeUnknownError
+	if errors.As(execErr, &unknown) && strings.TrimSpace(unknown.Message) != "" {
+		failure = unknown.Message
+	}
 	return h.cfg.Proposals.TransitionProposal(ctx, caller.Owner, id, from, revision,
-		ProposalStateUnknown, ProposalUpdate{Failure: UnknownOutcomeMessage})
+		ProposalStateUnknown, ProposalUpdate{Failure: failure})
 }
 
 // notifyProposal appends proposal.updated to the proposal's turn so a live
@@ -479,6 +484,35 @@ func (h *handler) nonTerminalProposals(ctx context.Context, owner OwnerKey, conv
 				continue
 			}
 			out = append(out, p)
+		}
+		if next == "" {
+			return out, nil
+		}
+		page.Cursor = next
+	}
+}
+
+// maxDecidedProposals bounds the decided proposals one conversation detail
+// returns: the most recent ones, which are the ones a reopened view shows.
+const maxDecidedProposals = 50
+
+// decidedProposals returns the conversation's most recent terminal proposals,
+// oldest first.
+func (h *handler) decidedProposals(ctx context.Context, owner OwnerKey, conversationID string) ([]Proposal, error) {
+	states := []ProposalState{
+		ProposalStateRejected, ProposalStateExpired, ProposalStateSucceeded, ProposalStateFailed,
+		ProposalStateUnknown, ProposalStateApplied, ProposalStateStale,
+	}
+	out := []Proposal{}
+	page := Page{Limit: maxPageLimit}
+	for {
+		items, next, err := h.cfg.Proposals.ListProposals(ctx, owner, conversationID, states, page)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, items...)
+		if len(out) > maxDecidedProposals {
+			out = append(out[:0:0], out[len(out)-maxDecidedProposals:]...)
 		}
 		if next == "" {
 			return out, nil

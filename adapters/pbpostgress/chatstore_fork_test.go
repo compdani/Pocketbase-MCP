@@ -3,8 +3,7 @@ package pbpostgress
 // ChatStore acceptance tests against a disposable PostgreSQL database
 // (PB_DB_DSN). They cover the shared chat.Store contract, the fork's portable
 // schema, concurrent provisioning by two instances, scoped restart recovery and
-// the unique-violation detector. MySQL is not available in this environment;
-// the schema and every query are written to work on it as well.
+// the unique-violation detector.
 
 import (
 	"context"
@@ -116,7 +115,7 @@ func TestChatStoreSchema(t *testing.T) {
 		t.Fatalf("active-slot index = %q, want a UNIQUE index", active)
 	}
 	if strings.Contains(strings.ToUpper(active), "WHERE") {
-		t.Fatalf("active-slot index is partial, which MySQL cannot express: %q", active)
+		t.Fatalf("active-slot index is partial, which the store never relies on: %q", active)
 	}
 	idem := turns.GetIndex("idx__mcpChatTurns_idempotency")
 	if idem == "" || !strings.Contains(idem, "UNIQUE") || strings.Contains(strings.ToUpper(idem), "WHERE") {
@@ -649,7 +648,6 @@ func TestChatUniqueViolationDetector(t *testing.T) {
 	unique := []string{
 		`ERROR: duplicate key value violates unique constraint "idx_x" (SQLSTATE 23505)`,
 		`ERROR: duplicate key value violates unique constraint "idx_x"`,
-		`Error 1062 (23000): Duplicate entry 'abc' for key 'idx_x'`,
 		`slot: Value must be unique.`,
 	}
 	for _, msg := range unique {
@@ -661,9 +659,6 @@ func TestChatUniqueViolationDetector(t *testing.T) {
 		`ERROR: null value in column "slot" violates not-null constraint (SQLSTATE 23502)`,
 		`ERROR: insert or update on table "x" violates foreign key constraint "y" (SQLSTATE 23503)`,
 		`ERROR: new row for relation "x" violates check constraint "y" (SQLSTATE 23514)`,
-		`Error 1048 (23000): Column 'slot' cannot be null`,
-		`Error 1452 (23000): Cannot add or update a child row: a foreign key constraint fails`,
-		`Error 3819 (HY000): Check constraint 'x' is violated.`,
 		`timeout`,
 	}
 	for _, msg := range notUnique {
@@ -928,8 +923,7 @@ func TestChatStoreProposalRecoveryScopedToNamespaceAndMount(t *testing.T) {
 	}
 }
 
-// On PostgreSQL a message may be much larger than MySQL's 64 KiB TEXT, up to
-// 4 MiB as on stock PocketBase, including on a store provisioned with the old
+// A message may be up to 4 MiB as on stock PocketBase, including on a store provisioned with the old
 // 1 MiB field maximum; past that, the store refuses before the database.
 func TestChatStorePostgresMessageLimit(t *testing.T) {
 	app := newChatForkApp(t)
@@ -958,9 +952,6 @@ func TestChatStorePostgresMessageLimit(t *testing.T) {
 	if got := col.Fields.GetByName(chatFieldParts).(*core.TextField).Max; got != chatJSONFieldMaxChars {
 		t.Fatalf("parts field max after upgrade = %d, want %d", got, chatJSONFieldMaxChars)
 	}
-	if got := chatJSONMax(); got != chatMaxJSONBytesPostgres {
-		t.Fatalf("limit on PostgreSQL = %d, want %d", got, chatMaxJSONBytesPostgres)
-	}
 
 	owner := chat.OwnerKey{Namespace: "ns", Mount: "/mcp", AuthCollectionID: "users", UserID: "u1"}
 	conv, err := store.CreateConversation(context.Background(), chat.Conversation{Owner: owner})
@@ -977,7 +968,7 @@ func TestChatStorePostgresMessageLimit(t *testing.T) {
 	if err != nil || len(msgs) != 1 || msgs[0].Parts[0].Text != long {
 		t.Fatalf("the 2 MiB message did not round-trip: %d messages, err %v", len(msgs), err)
 	}
-	huge := strings.Repeat("x", chatMaxJSONBytesPostgres)
+	huge := strings.Repeat("x", chatMaxJSONBytes)
 	_, err = store.AppendMessage(context.Background(), owner, chat.Message{
 		ConversationID: conv.ID, Role: chat.RoleUser, Parts: []chat.Part{{Type: chat.PartText, Text: huge}},
 	})
