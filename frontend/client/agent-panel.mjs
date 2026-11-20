@@ -1103,6 +1103,13 @@ export function bindAgentPanel(element, controller, options = {}) {
   // Likewise the controller error that was showing when it started; the
   // controller clears it once the send gets going.
   let staleStateError = null;
+  // A submit is on its way and not yet accepted or failed (it may still be
+  // creating the conversation or uploading); a second one is refused.
+  let sending = false;
+  // Whether the binding disabled the composer itself (features.ready false),
+  // so it never re-enables a composer the host disabled.
+  let disabledByBinding = false;
+  const restoreDraft = options.restoreDraft !== false;
 
   /** The line for an error, through the host's errorText option. */
   function textFor(error, text = errorText(error), code = errorCode(error)) {
@@ -1155,14 +1162,21 @@ export function bindAgentPanel(element, controller, options = {}) {
       contextReferences: options.contextReferences,
       proposalErrorText: proposalText,
     }));
-    writeProperty(element, 'running', snapshot.running === true);
+    // While a submit is on its way the element counts as running, so it
+    // refuses another submit itself.
+    writeProperty(element, 'running', snapshot.running === true || sending || snapshot.sending === true);
+    writeReady(snapshot);
 
     const turn = snapshot.turn && typeof snapshot.turn === 'object' ? snapshot.turn : null;
     if (staleTurnId !== null && (!turn || String(turn.turnId ?? '') !== staleTurnId)) staleTurnId = null;
     const turnError = turn && staleTurnId === null ? turn.error : null;
     if (staleStateError !== null && snapshot.error !== staleStateError) staleStateError = null;
     const stateError = staleStateError === null ? snapshot.error : null;
-    const mapped = textFor(stateError) || textFor(turnError);
+    // With no model provider set up the composer is disabled; say why.
+    const notReady = options.disableWhenNotReady !== false
+      && snapshot.features && snapshot.features.ready === false;
+    const mapped = textFor(stateError) || textFor(turnError)
+      || (notReady ? textFor({ code: 'no_provider' }) : '');
     const text = localError || mapped;
     if (text === '') {
       dismissedError = null;
@@ -1189,6 +1203,23 @@ export function bindAgentPanel(element, controller, options = {}) {
       writeProperty(element, 'hasMore', Boolean(snapshot.nextCursor));
       // The panel's heading is the host's (e.g. the assistant's name).
       if (page) writeHeading(element, titleOfConversation(snapshot, active));
+    }
+  }
+
+  /**
+   * Disable the composer while the server says no model provider is set up
+   * (`features.ready === false`), and show why. Only a composer the binding
+   * disabled is enabled again.
+   */
+  function writeReady(snapshot) {
+    if (options.disableWhenNotReady === false) return;
+    const notReady = snapshot.features && snapshot.features.ready === false;
+    if (notReady && !element.disabled) {
+      writeProperty(element, 'disabled', true);
+      disabledByBinding = true;
+    } else if (!notReady && disabledByBinding) {
+      writeProperty(element, 'disabled', false);
+      disabledByBinding = false;
     }
   }
 
@@ -1363,6 +1394,13 @@ export function bindAgentPanel(element, controller, options = {}) {
       return;
     }
 
+    if (sending) {
+      // The previous submit is still creating its conversation or uploading.
+      if (typeof event.preventDefault === 'function') event.preventDefault();
+      report({ status: 'failed', text, code: 'busy', error: null, message: '' });
+      return;
+    }
+
     const features = state().features;
     if (files.length > 0 && features && features.uploads === false) {
       if (typeof event.preventDefault === 'function') event.preventDefault();
@@ -1386,10 +1424,27 @@ export function bindAgentPanel(element, controller, options = {}) {
     pendingConversationId = state().activeConversationId
       ? String(state().activeConversationId)
       : null;
+    sending = true;
     paint();
+    const fromDraft = detail.fromDraft !== false;
+    const references = Array.isArray(detail.references) ? detail.references : [];
+    const settle = (outcome) => {
+      sending = false;
+      if (!unbound) paint();
+      return outcome;
+    };
+    // Put the message back after any failure before the server accepted it,
+    // so the person can retry without retyping; never clobber words typed
+    // meanwhile. A cancelled send leaves the composer alone.
+    const restore = (outcome) => {
+      if (unbound || !restoreDraft || (outcome.status !== 'failed' && outcome.status !== 'refused')) return;
+      if (fromDraft && element.draft === '') element.draft = text;
+      const current = Array.isArray(element.references) ? element.references : [];
+      if (references.length > 0 && current.length === 0) element.references = references;
+    };
 
     if (files.length === 0) {
-      void deliver(text, model, [], effort);
+      void deliver(text, model, [], effort).then(settle).then(restore);
       return;
     }
 
@@ -1397,12 +1452,12 @@ export function bindAgentPanel(element, controller, options = {}) {
     // event, so cancel it and clear only the draft: the chips stay until the
     // turn is accepted, and a failure keeps them for a retry.
     if (typeof event.preventDefault === 'function') event.preventDefault();
-    const fromDraft = detail.fromDraft !== false;
     if (typeof element.clearComposer === 'function') {
       element.clearComposer({ draft: fromDraft, attachments: false });
     }
     setAttachmentState(element, items, { busy: true });
-    void deliver(text, model, files, effort).then((outcome) => {
+    void deliver(text, model, files, effort).then(settle).then((outcome) => {
+      if (unbound) return;
       if (outcome.status === 'accepted') {
         for (const item of items) {
           const id = item && typeof item === 'object' ? item.id : '';
@@ -1419,14 +1474,15 @@ export function bindAgentPanel(element, controller, options = {}) {
         return;
       }
       setAttachmentState(element, items, { error: localError || outcome.message || localText('upload_failed') });
-      // Put the draft back so the person can retry without retyping; never
-      // clobber words typed while the upload was running.
-      if (fromDraft && element.draft === '') element.draft = text;
+      restore(outcome);
       paint();
     });
   }
 
   function onStop() {
+    // Before the turn is accepted there is nothing on the server to cancel;
+    // cancelling the previous, finished turn would only produce an error.
+    if (state().running !== true) return;
     void controller.stop();
   }
 

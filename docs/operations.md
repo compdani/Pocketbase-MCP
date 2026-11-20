@@ -147,6 +147,20 @@ The root module and the submodules (`auth/stockoauth`, `adapters/pocketbase`,
 4. After pushing, `GOWORK=off go mod tidy` in each submodule records the
    root's checksum in its `go.sum` (a follow-up commit).
 
+**The browser client** (`frontend/client`, `@pocketbase-mcp/chat-client`)
+is released with the same version, through a mirror repository whose root is
+the package, because npm can't install a subdirectory of a git repository:
+
+1. Set `frontend/client/package.json`'s `version` to the release version and
+   commit (with step 1 above).
+2. `scripts/release-chat-client.sh v0.1.8` checks the version and the tests,
+   splits the client's history out (`git subtree split`), tags the split
+   commit `chat-client/v0.1.8` and prints the push command for
+   `github.com/compdani/pocketbase-mcp-chat-client` (`MIRROR` overrides it).
+   It pushes nothing.
+3. Hosts install it with `npm install
+   github:compdani/pocketbase-mcp-chat-client#v0.1.8`, like agent-panel.
+
 **Message size on the fork.** A chat message (and any other stored JSON
 payload) may be up to 4 MiB, as on stock PocketBase. The fork store raises the
 field maximum of an existing install in place on startup; the column type

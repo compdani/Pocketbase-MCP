@@ -160,6 +160,12 @@ export interface ChatControllerState {
   /** Live view of the current (or last) turn. */
   turn: TurnView | null;
   running: boolean;
+  /**
+   * True from a send() call until its turn is accepted or the send fails:
+   * covers the context read, uploads and the submission itself, which all
+   * happen before `running`.
+   */
+  sending: boolean;
   error: ChatTurnFailure | null;
   /** /status features: proposals and uploads. */
   features: ChatFeatures | null;

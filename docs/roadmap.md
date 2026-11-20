@@ -10,7 +10,16 @@ line for every failed chat turn (with the provider's sanitized reason), plain
 messages for failed-turn codes in the agent-panel binding, and per-turn
 reasoning effort.
 
-Unreleased, for List Pocket: `503 no_provider` and `features.ready` when no
+Unreleased (v0.1.8), for List Pocket: the agent-panel binding refuses a
+second submit while the first is still on its way (`running` covers it, and
+the controller has `state.sending`), puts the draft and references back after
+any failure before the turn was accepted (`restoreDraft`), and disables the
+composer while `features.ready` is false (`disableWhenNotReady`). The browser
+client is versioned with the module (0.1.8) and released to a mirror
+repository with `scripts/release-chat-client.sh`, so hosts can install it from
+a git tag instead of vendoring it.
+
+Released in v0.1.7, for List Pocket: `503 no_provider` and `features.ready` when no
 model provider is set up; decided proposals (`decidedProposals`) and outcome
 results on reopened conversations; `pbmcp.OutcomeUnknown` for a custom tool
 that can't tell whether it wrote; `ChatOptions.ToolTimeout`, with a
@@ -57,7 +66,7 @@ migrations.
 - **Chat v1.4: context window management** is implemented and tested:
   token-budget history, overflow retry, background and manual summaries, and
   the context ring with Compact. See [context-window-plan.md](context-window-plan.md)
-  and [chat.md section 11](chat.md#11-context-window-and-summaries). The examples pin agent-panel v0.5.0 for the ring. Still to
+  and [chat.md section 11](chat.md#11-context-window-and-summaries). The examples pin agent-panel v0.5.1 (the ring is v0.5.0+). Still to
   do: check the overflow error shapes against real providers on staging, and try a
   summary with a real model.
 

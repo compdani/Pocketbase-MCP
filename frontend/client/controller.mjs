@@ -79,6 +79,7 @@ function initialState() {
     pendingUploads: [],
     turn: null,
     running: false,
+    sending: false,
     error: null,
     features: null,
     limits: null,
@@ -950,6 +951,7 @@ export class ChatController extends EventTarget {
     // Clear everything the previous account owned before any new request.
     this._state = initialState();
     this._initPending = null;
+    this._sends = 0;
     this.dispatchEvent(new Event('change'));
     // The sync channel is named after the account: reopen it for the new one.
     this._startSync();
@@ -1718,7 +1720,20 @@ export class ChatController extends EventTarget {
     // A context the server turns out not to take is never awaited; don't let
     // a failed read become an unhandled rejection.
     if (context && typeof context.catch === 'function') context.catch(() => {});
-    return this._track(this._send(text, { ...opts, context }));
+    // `sending` is true from this call until the server accepted the turn or
+    // the send failed, so a UI can refuse a second submit meanwhile (the
+    // upload and the context read happen before `running`).
+    const epoch = this._epoch;
+    this._sends = (this._sends ?? 0) + 1;
+    if (!this._state.sending) this._set({ sending: true });
+    const done = () => {
+      if (epoch !== this._epoch) return; // an account switch reset the count
+      this._sends -= 1;
+      if (this._sends === 0 && this._state.sending) this._set({ sending: false });
+    };
+    const pending = this._send(text, { ...opts, context });
+    pending.then(done, done);
+    return this._track(pending);
   }
 
   /**

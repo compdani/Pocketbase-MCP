@@ -675,8 +675,8 @@ browser package:
   conversation list (the page's sidebar, or the panel's `conversations-menu`
   switcher, which since agent-panel 0.4.1 is the panel's header title). It
   requires [agent-panel](https://github.com/compdani/agent-panel) **v0.4.0 or
-  later**, and v0.5.0 for the context ring; the examples pin v0.5.0
-  (`npm install github:compdani/agent-panel#v0.5.0`).
+  later**, and v0.5.0 for the context ring; the examples pin v0.5.1
+  (`npm install github:compdani/agent-panel#v0.5.1`).
 - **List sync**: each controller re-reads its conversation list after a turn
   ends, on focus and once a minute while visible, and announces its own
   changes to other controllers for the same account (other elements on the

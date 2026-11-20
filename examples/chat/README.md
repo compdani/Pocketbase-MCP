@@ -47,7 +47,7 @@ The log confirms it: `chat enabled with the OFFLINE DEMO provider … at
 See each example's README. Every one proxies `/api` to the server on
 `PB_URL` (default `http://127.0.0.1:8090`) and streams events through
 unbuffered. They use
-[agent-panel](https://github.com/compdani/agent-panel) `v0.5.0` (the binding
+[agent-panel](https://github.com/compdani/agent-panel) `v0.5.1` (the binding
 needs `v0.4.0` or later; 0.5.0 adds the context ring): Vue and
 Svelte install it with `npm install`, and the plain example loads it from
 jsDelivr. Set `AGENT_PANEL_DIR` to use a local agent-panel checkout instead.
