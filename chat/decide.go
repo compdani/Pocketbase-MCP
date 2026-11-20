@@ -337,6 +337,22 @@ func (h *handler) approveProposal(w http.ResponseWriter, r *http.Request, caller
 	defer cancel()
 	result, execErr := executor.Execute(execCtx, executing)
 
+	var refused RefusedError
+	if errors.As(execErr, &refused) {
+		// Nothing was written: the proposal is pending again, carrying the
+		// reason, and the user can fix and approve it again.
+		msg, _ := toolFailureMessage(execErr)
+		pending, err := h.cfg.Proposals.TransitionProposal(recordCtx, caller.Owner, executing.ID,
+			ProposalStateExecuting, executing.Revision, ProposalStatePending, ProposalUpdate{Failure: msg, ClearDecided: true})
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, CodeInternal, msgInternal)
+			return
+		}
+		h.notifyProposal(recordCtx, pending)
+		h.writeProposalError(w, http.StatusUnprocessableEntity, CodeRefused, msg, pending)
+		return
+	}
+
 	final, err := h.recordOutcome(recordCtx, caller, executing, result, execErr)
 	if err != nil {
 		// The client learns nothing about a stored execution, but the proposal
@@ -402,11 +418,11 @@ func (h *handler) recordOutcome(ctx context.Context, caller Caller, executing Pr
 			result, _ = json.Marshal(string(result))
 		}
 		return h.cfg.Proposals.TransitionProposal(ctx, caller.Owner, id, from, revision,
-			ProposalStateSucceeded, ProposalUpdate{Result: result})
+			ProposalStateSucceeded, ProposalUpdate{Result: result, ClearFailure: true})
 	}
 	if msg, definite := toolFailureMessage(execErr); definite {
 		return h.cfg.Proposals.TransitionProposal(ctx, caller.Owner, id, from, revision,
-			ProposalStateFailed, ProposalUpdate{Failure: msg})
+			ProposalStateFailed, ProposalUpdate{Failure: msg, ClearFailure: true})
 	}
 	return h.cfg.Proposals.TransitionProposal(ctx, caller.Owner, id, from, revision,
 		ProposalStateUnknown, ProposalUpdate{Failure: UnknownOutcomeMessage})

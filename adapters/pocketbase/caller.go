@@ -8,6 +8,7 @@ import (
 
 	"ganigeorgiev.com/pocketbase/pocketbase/core"
 	pbmcp "github.com/compdani/pocketbase-mcp"
+	"github.com/compdani/pocketbase-mcp/chat"
 )
 
 // Caller is the signed-in PocketBase user behind one custom tool call.
@@ -67,4 +68,17 @@ func (c *Caller) RequestEvent(ctx context.Context, method, target string, body i
 	e.Request = req
 	e.Response = rec
 	return e, rec
+}
+
+// ResolveTurnCaller returns the user behind a chat turn, for a
+// chat.RunnerConfig.Setup hook that reads what the turn's context names as the
+// caller (through the host's own permission-checked handlers). It validates
+// the token again, exactly like ResolveCaller. A turn without a chat
+// principal is refused with pbmcp.Denied.
+func ResolveTurnCaller(ctx context.Context, app core.App, in chat.TurnInput) (*Caller, error) {
+	p, ok := pbmcp.TurnPrincipal(in)
+	if !ok {
+		return nil, pbmcp.Denied("Sign in again to use this tool.")
+	}
+	return ResolveCaller(app, pbmcp.CallContext{Principal: p, Context: ctx})
 }

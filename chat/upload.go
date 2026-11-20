@@ -101,6 +101,23 @@ var rejectedUploadExtensions = map[string]struct{}{
 // whether a file is binary: magic bytes win, and text has to be valid UTF-8
 // without NUL bytes. ok is false for anything the chat surface does not accept.
 func DetectUpload(name string, data []byte) (mimeType, kind string, ok bool) {
+	return DetectUploadWith(name, data, false)
+}
+
+// OtherImageTypes are the image formats AcceptOtherImages stores in addition
+// to the canonical ones. Models generally can't read them: a turn sends them
+// only to a provider that declares support, and otherwise tells the model the
+// file was omitted. SVG is never accepted, because it can carry scripts.
+var OtherImageTypes = []string{"image/bmp", "image/tiff", "image/x-icon", "image/heic", "image/avif"}
+
+// DetectUploadWith is DetectUpload that, with otherImages, also recognizes
+// OtherImageTypes by their signatures.
+func DetectUploadWith(name string, data []byte, otherImages bool) (mimeType, kind string, ok bool) {
+	if otherImages {
+		if mimeType := otherImageType(data); mimeType != "" {
+			return mimeType, UploadKindImage, true
+		}
+	}
 	switch {
 	case bytes.HasPrefix(data, magicPNG):
 		return "image/png", UploadKindImage, true
@@ -184,4 +201,34 @@ func attachmentTypesFor(supports func(string) bool) []string {
 		}
 	}
 	return out
+}
+
+// otherImageType recognizes an OtherImageTypes image by its signature.
+func otherImageType(data []byte) string {
+	switch {
+	case len(data) >= 26 && data[0] == 'B' && data[1] == 'M':
+		return "image/bmp"
+	case bytes.HasPrefix(data, []byte("II*\x00")) || bytes.HasPrefix(data, []byte("MM\x00*")):
+		return "image/tiff"
+	case len(data) >= 6 && bytes.HasPrefix(data, []byte{0, 0, 1, 0}) && data[4] > 0:
+		return "image/x-icon"
+	case len(data) >= 12 && string(data[4:8]) == "ftyp":
+		switch string(data[8:12]) {
+		case "avif", "avis":
+			return "image/avif"
+		case "heic", "heix", "hevc", "heim", "heis", "mif1", "msf1":
+			return "image/heic"
+		}
+	}
+	return ""
+}
+
+// isOtherImageType reports one of OtherImageTypes.
+func isOtherImageType(mimeType string) bool {
+	for _, t := range OtherImageTypes {
+		if t == mimeType {
+			return true
+		}
+	}
+	return false
 }

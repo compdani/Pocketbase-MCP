@@ -76,6 +76,8 @@ export interface AgentProposalEntry {
   error: string;
   status: string;
   detail: string;
+  /** The host's notes about the change, shown under it. */
+  warnings: string[];
   canDecide: boolean;
 }
 

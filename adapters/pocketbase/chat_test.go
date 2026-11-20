@@ -67,6 +67,8 @@ type chatEnvOptions struct {
 	steps func(env *chatEnv) []scripted.Step
 	// enable replaces the default legacy EnableChat call, for catalog tests.
 	enable func(*Server) error
+	// chatOnly sets Config.DisableMCPEndpoint.
+	chatOnly bool
 }
 
 func fixedSteps(steps ...scripted.Step) func(*chatEnv) []scripted.Step {
@@ -183,6 +185,8 @@ func newChatEnv(t *testing.T, opts chatEnvOptions) *chatEnv {
 		Auth:        pbmcp.AuthConfig{Collections: []string{"users"}, AllowSuperusers: opts.allowSuperusers},
 		Manifest:    chatDealsManifest(),
 		AllowWrites: opts.allowWrites,
+		// Chat-only servers mount no MCP endpoint.
+		DisableMCPEndpoint: opts.chatOnly,
 	}
 	if opts.manifest != nil {
 		cfg.Manifest = opts.manifest
@@ -1083,4 +1087,20 @@ func TestChatProposalRestartRecoveryMarksExecutingUnknown(t *testing.T) {
 		t.Fatalf("recovered proposal = %+v", got)
 	}
 	assertNoteCount(t, env, 0)
+}
+
+func TestChatOnlyMountsNoMCPEndpoint(t *testing.T) {
+	env := newChatEnv(t, chatEnvOptions{chatOnly: true})
+	if code := env.json(env.userToken, http.MethodGet, chatTestPrefix+"/status", "", nil); code != http.StatusOK {
+		t.Fatalf("chat status: HTTP %d", code)
+	}
+	for _, path := range []string{"/mcp", "/.well-known/oauth-protected-resource/mcp"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+		req.Header.Set("Authorization", "Bearer "+env.userToken)
+		rec := httptest.NewRecorder()
+		env.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s: HTTP %d, want 404", path, rec.Code)
+		}
+	}
 }

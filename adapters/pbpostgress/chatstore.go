@@ -46,9 +46,11 @@ package pbpostgress
 //     (key order, whitespace, duplicate keys), but chat.Store must return the
 //     caller's bytes exactly as written (the shared store contract checks
 //     this), so the columns hold the raw JSON text and the store unmarshals on
-//     read. TEXT has no limit on PostgreSQL; MySQL TEXT is 64 KiB, so the
-//     store rejects payloads above 60 KiB with a clear error before the
-//     database does.
+//     read. MySQL TEXT stops at 64 KiB, so on MySQL the store rejects payloads
+//     above 60 KiB with a clear error before the database does. PostgreSQL
+//     TEXT has no limit; there a payload may be as long as the field allows
+//     (chatJSONFieldMaxChars, 4 MiB, as on stock PocketBase). See
+//     chatJSONLimit.
 
 import (
 	"context"
@@ -62,6 +64,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -112,6 +115,8 @@ const (
 	// chatFieldContextSummary holds the conversation's summary (a
 	// chat.Summary as JSON text), or nothing.
 	chatFieldContextSummary = "contextSummary"
+	// chatFieldImportSource is the SourceID of an imported conversation.
+	chatFieldImportSource = "importSource"
 
 	// Proposal fields. They keep the chat.Proposal names, except that the
 	// conversation and turn bindings use their own column names so a proposal
@@ -132,6 +137,7 @@ const (
 	chatFieldResult               = "result"
 	chatFieldFailure              = "failure"
 	chatFieldEditorRevision       = "editorRevision"
+	chatFieldWarnings             = "warnings"
 	chatFieldHunks                = "hunks"
 
 	// Upload fields. The conversation binding uses its own column name so an
@@ -156,14 +162,16 @@ const (
 	chatSlotMaxLen = 200
 	// chatJSONFieldMaxChars makes the fork create a TEXT column on MySQL
 	// (it promotes text fields with Max > 255) and an unbounded TEXT column
-	// on PostgreSQL. The effective bound is chatMaxJSONBytes.
-	chatJSONFieldMaxChars = 1 << 20
-	// chatMaxJSONBytes is the portable payload limit: MySQL TEXT stops at
-	// 64 KiB, so values are rejected in Go before the database truncates or
-	// errors. The chat HTTP body default is 64 KiB, so this never rejects a
-	// request the HTTP layer accepted unless it is almost entirely multi-byte
-	// text.
-	chatMaxJSONBytes = 60 << 10
+	// on PostgreSQL. The effective bound is chatJSONMax().
+	chatJSONFieldMaxChars = 4 << 20
+	// chatMaxJSONBytesMySQL is the payload limit on MySQL, whose TEXT stops
+	// at 64 KiB: values are rejected in Go before the database truncates or
+	// errors.
+	chatMaxJSONBytesMySQL = 60 << 10
+	// chatMaxJSONBytesPostgres is the payload limit on PostgreSQL, whose TEXT
+	// is unbounded: the field's own maximum (in characters, so at least as
+	// many bytes for ASCII), kept so existing collections need no change.
+	chatMaxJSONBytesPostgres = chatJSONFieldMaxChars
 	// chatMaxIdempotencyKeyBytes bounds one client Idempotency-Key. Keys are
 	// stored verbatim (they are returned to the caller) but never indexed:
 	// the index covers the digest column instead.
@@ -221,6 +229,8 @@ type ChatStore struct {
 	uploads       string
 
 	maxEvents int
+	// importMu serializes ImportConversation (see there).
+	importMu sync.Mutex
 	// lastUploadMS makes consecutive upload timestamps strictly increasing.
 	// The stored date keeps millisecond precision, so two uploads stored within
 	// one millisecond would otherwise tie and fall back to an arbitrary id
@@ -234,6 +244,7 @@ var _ chat.UploadStore = (*ChatStore)(nil)
 var _ chat.ActiveTurnStore = (*ChatStore)(nil)
 var _ chat.RecentMessageStore = (*ChatStore)(nil)
 var _ chat.SummaryStore = (*ChatStore)(nil)
+var _ chat.ImportStore = (*ChatStore)(nil)
 
 var chatCollectionPrefixPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -253,6 +264,7 @@ func NewChatStore(app core.App, opts ChatStoreOptions) (*ChatStore, error) {
 	if app == nil {
 		return nil, errors.New("chat store: nil app")
 	}
+	noteChatDatabase(app)
 	if (opts.Namespace == "") != (opts.Mount == "") {
 		return nil, errors.New("chat store: namespace and mount must be set together (both empty means an unscoped store)")
 	}
@@ -373,10 +385,12 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 					&core.DateField{Name: chatFieldCreatedAt, System: true},
 					&core.DateField{Name: chatFieldUpdatedAt, System: true},
 					chatJSONTextField(chatFieldContextSummary),
+					chatTextField(chatFieldImportSource, chatMaxTextLen, true),
 				)
 			},
-			// v1.4 adds the conversation summary. Older stores gain it in place.
-			addFields: []string{chatFieldContextSummary},
+			// v1.4 adds the conversation summary and the import source. Older
+			// stores gain them in place.
+			addFields: []string{chatFieldContextSummary, chatFieldImportSource},
 			indexes: []chatIndexSpec{
 				// Both columns are VARCHAR(255) on MySQL, so two text
 				// columns (2040 bytes in utf8mb4) stay well below the
@@ -480,8 +494,11 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 					&core.DateField{Name: chatFieldDecidedAt, System: true},
 					&core.DateField{Name: chatFieldCreatedAt, System: true},
 					&core.DateField{Name: chatFieldUpdatedAt, System: true},
+					chatJSONTextField(chatFieldWarnings),
 				)
 			},
+			// v1.4 adds proposal warnings. Older stores gain them in place.
+			addFields: []string{chatFieldWarnings},
 			indexes: []chatIndexSpec{
 				// The per-conversation list order is served by this index; the
 				// id tie-break is applied by the ORDER BY, as in the other
@@ -580,9 +597,20 @@ func adoptChatCollection(app core.App, spec chatCollectionSpec, existing *core.C
 	}
 	added := false
 	for _, want := range spec.fields() {
-		if existing.Fields.GetByName(want.GetName()) == nil && spec.allowsAdd(want.GetName()) {
+		got := existing.Fields.GetByName(want.GetName())
+		if got == nil && spec.allowsAdd(want.GetName()) {
 			existing.Fields.Add(want)
 			added = true
+			continue
+		}
+		// A text field's maximum only ever rises (v1.4 raised the JSON
+		// payload fields from 1 MiB to 4 MiB characters). The column type
+		// doesn't change: TEXT on PostgreSQL and on MySQL alike.
+		if gotText, ok := got.(*core.TextField); ok {
+			if wantText, ok := want.(*core.TextField); ok && gotText.Max > 0 && wantText.Max > gotText.Max {
+				gotText.Max = wantText.Max
+				added = true
+			}
 		}
 	}
 	if added {
@@ -723,13 +751,57 @@ func chatRawJSON(rec *core.Record, name string) json.RawMessage {
 	return json.RawMessage(append([]byte(nil), s...))
 }
 
+// chatJSONLimit is the JSON payload limit for the database in use. It starts
+// at the MySQL limit, the safe one, and rises to the PostgreSQL limit once a
+// store is created on PostgreSQL (noteChatDatabase). A fork app runs on one
+// database, so the limit is per process; if a MySQL-backed store ever shares
+// the process, the limit stays at MySQL's.
+var (
+	chatJSONLimit     atomic.Int64
+	chatJSONLimitOnce sync.Once
+	chatSawMySQL      atomic.Bool
+)
+
+func chatJSONMax() int {
+	chatJSONLimitOnce.Do(func() {
+		if chatJSONLimit.Load() == 0 {
+			chatJSONLimit.Store(chatMaxJSONBytesMySQL)
+		}
+	})
+	return int(chatJSONLimit.Load())
+}
+
+// noteChatDatabase sets chatJSONLimit from the app's database driver.
+func noteChatDatabase(app core.App) {
+	chatJSONMax()
+	driver := ""
+	// DB() is the fork's dual builder; the write connection is a plain
+	// *dbx.DB that knows its driver.
+	for _, b := range []any{app.NonconcurrentDB(), app.DB()} {
+		if db, ok := b.(interface{ DriverName() string }); ok {
+			driver = db.DriverName()
+			break
+		}
+	}
+	switch driver {
+	case "pgx", "postgres":
+		if !chatSawMySQL.Load() {
+			chatJSONLimit.Store(chatMaxJSONBytesPostgres)
+		}
+	default:
+		// MySQL, or a driver we don't know: the safe limit, for good.
+		chatSawMySQL.Store(true)
+		chatJSONLimit.Store(chatMaxJSONBytesMySQL)
+	}
+}
+
 func chatSetJSON(rec *core.Record, name string, raw json.RawMessage) error {
 	if len(raw) == 0 {
 		rec.Set(name, "")
 		return nil
 	}
-	if len(raw) > chatMaxJSONBytes {
-		return fmt.Errorf("chat store: %s payload is %d bytes, the portable limit is %d", name, len(raw), chatMaxJSONBytes)
+	if limit := chatJSONMax(); len(raw) > limit {
+		return fmt.Errorf("chat store: %s payload is %d bytes, over this database's limit of %d", name, len(raw), limit)
 	}
 	rec.Set(name, string(raw))
 	return nil
@@ -1897,4 +1969,97 @@ func chatSummaryFrom(rec *core.Record) (chat.Summary, bool, error) {
 		return chat.Summary{}, false, nil
 	}
 	return sum, true, nil
+}
+
+// ImportConversation implements chat.ImportStore: the conversation and its
+// messages are written in one transaction, and an owner's second import of a
+// SourceID returns the first conversation without writing anything.
+func (s *ChatStore) ImportConversation(ctx context.Context, owner chat.OwnerKey, c chat.ImportedConversation) (chat.Conversation, bool, error) {
+	if err := owner.Validate(); err != nil {
+		return chat.Conversation{}, false, err
+	}
+	// The "already imported?" check and the insert must not interleave: two
+	// tabs (or a retry after a slow answer) import the same thread at once.
+	// Imports are rare, so one lock per store is enough. It covers one
+	// process; instances sharing a database rely on imports being one-off.
+	s.importMu.Lock()
+	defer s.importMu.Unlock()
+	if err := chat.ValidateImport(&c, time.Now()); err != nil {
+		return chat.Conversation{}, false, err
+	}
+	// A message must fit this store's parts column; say which one doesn't
+	// (a 400), rather than failing the transaction (a 500).
+	for i, m := range c.Messages {
+		raw, err := json.Marshal(m.Parts)
+		if err != nil {
+			return chat.Conversation{}, false, err
+		}
+		if limit := chatJSONMax(); len(raw) > limit {
+			return chat.Conversation{}, false, fmt.Errorf("%w: message %d is %d bytes, over this store's %d-byte limit per message",
+				chat.ErrInvalidImport, i, len(raw), limit)
+		}
+	}
+	title := c.Title
+	if title == "" {
+		title = chat.ImportTitle(c)
+	}
+	var (
+		out     chat.Conversation
+		created bool
+	)
+	err := s.chatRunTx(func(tx core.App) error {
+		created = false
+		params := chatOwnerParams(owner)
+		params[chatFieldImportSource] = c.SourceID
+		if existing, err := chatFirst(tx, s.conversations,
+			chatFieldOwnerKey+" = {:ownerKey} && "+chatFieldImportSource+" = {:importSource}", params); err == nil {
+			out = chatConversationFrom(existing)
+			return nil
+		} else if !errors.Is(err, chat.ErrNotFound) {
+			return err
+		}
+		convCol, err := chatCollection(tx, s.conversations)
+		if err != nil {
+			return err
+		}
+		conv := core.NewRecord(convCol)
+		chatSetOwner(conv, owner)
+		conv.Set(chatFieldTitle, title)
+		conv.Set(chatFieldTarget, c.Target)
+		conv.Set(chatFieldCreatedAt, chatTime(c.CreatedAt))
+		conv.Set(chatFieldUpdatedAt, chatTime(c.UpdatedAt))
+		conv.Set(chatFieldImportSource, c.SourceID)
+		if err := tx.SaveWithContext(ctx, conv); err != nil {
+			return err
+		}
+		msgCol, err := chatCollection(tx, s.messages)
+		if err != nil {
+			return err
+		}
+		for _, m := range c.Messages {
+			rec := core.NewRecord(msgCol)
+			chatSetOwner(rec, owner)
+			rec.Set(chatFieldConversation, conv.Id)
+			rec.Set(chatFieldTurn, "")
+			rec.Set(chatFieldRole, m.Role)
+			raw, err := json.Marshal(m.Parts)
+			if err != nil {
+				return fmt.Errorf("chat store: marshal imported parts: %w", err)
+			}
+			if err := chatSetJSON(rec, chatFieldParts, raw); err != nil {
+				return err
+			}
+			rec.Set(chatFieldCreatedAt, chatTime(m.CreatedAt))
+			if err := tx.SaveWithContext(ctx, rec); err != nil {
+				return err
+			}
+		}
+		out = chatConversationFrom(conv)
+		created = true
+		return nil
+	})
+	if err != nil {
+		return chat.Conversation{}, false, err
+	}
+	return out, created, nil
 }

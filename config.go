@@ -141,6 +141,20 @@ type ToolSpec struct {
 	// The tool's title and whether it changes data or the editor are still
 	// shown around it. Empty output falls back to the default summary.
 	Summarize func(args map[string]any) string
+	// Prepare, when set, turns a chat write or editor call's arguments into
+	// the ones the proposal stores, before they are validated and reviewed:
+	// for example snapshotting a draft's files into the arguments, so the
+	// reviewer approves exactly those files and not whatever the draft holds
+	// later. It runs only for calls that become proposals (an auto-approved
+	// call runs its own arguments), once; an edited or
+	// approved proposal runs exactly the stored arguments. Errors are shown
+	// like Validate's. It may read the host's data; it must not change it.
+	Prepare func(ctx context.Context, p Principal, args map[string]any) (map[string]any, error)
+	// Warn, when set, returns notes about a chat proposal's validated
+	// arguments (for example "this workflow has no trigger"). They are stored
+	// on the proposal, shown on its card and sent to the model with the
+	// pending result. They never block the change; refuse with Validate.
+	Warn func(ctx context.Context, p Principal, args map[string]any) []string
 }
 
 // Config configures a Server. Zero values get documented defaults.
@@ -150,6 +164,11 @@ type Effects struct {
 	Idempotent     bool
 }
 type Config struct {
+	// DisableMCPEndpoint serves chat only: RegisterRoutes mounts neither the
+	// MCP endpoint (Path) nor its OAuth routes, for a host that ships MCP some
+	// other way (a stdio server, say) or not at all. Custom tools still run on
+	// chat.
+	DisableMCPEndpoint      bool
 	MaxToolTimeout          time.Duration
 	MaxResponseBytes        int64
 	DisableOutputValidation bool

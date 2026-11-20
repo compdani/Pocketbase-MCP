@@ -22,10 +22,14 @@ it.
 9. [Browser client and examples](#9-browser-client-and-examples)
 10. [Limits](#10-limits)
 11. [Context window and summaries](#11-context-window-and-summaries)
+12. [Importing history](#12-importing-history)
 
 ## 1. Turning it on
 
-In a PocketBase adapter, call `EnableChat` before `RegisterRoutes`. The simple
+In a PocketBase adapter, call `EnableChat` before `RegisterRoutes`. A host
+that wants chat without the HTTP MCP endpoint sets
+`pbmcp.Config.DisableMCPEndpoint`: `RegisterRoutes` then mounts only chat (no
+`/mcp`, no OAuth metadata), and custom tools still run on chat. The simple
 form uses one provider:
 
 ```go
@@ -80,6 +84,9 @@ recovers from a previous crash (section 4) and mounts the API.
 | `Uploads` | Turn on file attachments (section 7). |
 | `MaxUploadBytes`, `MaxAttachmentsPerTurn`, `MaxUploadsPerConversation` | Upload limits (defaults 10 MiB, 5, 50). |
 | `MaxBodyBytes`, `MaxMessageChars`, `HeartbeatInterval` | Request size (64 KiB), message length (16,000 characters), SSE heartbeat (15s). |
+| `Imports`, `MaxImportBytes` | Serve the browser import route (section 12); an import request may be up to 8 MiB. |
+| `StoreContext` | Keep each turn's context and give `Setup` the earlier ones (section 3). Needs `TurnContext`. |
+| `AcceptOtherImages` | Also store BMP, TIFF, ICO, HEIC and AVIF images (section 7). |
 | `TargetCheck` | Optional check that a caller may use a conversation's target record. |
 | `TurnContext`, `MaxContextBytes` | Accept a page context object on each turn (section 3), up to 16 KiB by default. Off means a turn with a context is rejected. |
 
@@ -99,6 +106,7 @@ ever read from that header, never from a URL.
 | `GET /status` | Models, limits and which features are on |
 | `GET /conversations` | The caller's conversations, newest first (by creation), optionally by target. `updatedAt` is the last activity: a rename, a generated title or a new turn |
 | `POST /conversations` | Create one, optionally tied to a target record |
+| `POST /conversations/actions/import` | Import a thread the browser kept (`Imports` on; section 12) |
 | `GET /conversations/{id}` | Transcript plus open proposals, and `context` when the window is managed (section 11) |
 | `GET /conversations/{id}/context` | How full the conversation's context is (section 11) |
 | `POST /conversations/{id}/compact` | Summarize the older messages now (summaries on; section 11) |
@@ -178,8 +186,12 @@ tool call from its result.
 **Page context.** With `TurnContext` on, a turn may carry a `context` object
 describing what the user is looking at: the screen, filters, selected text,
 the editor's revision, mentioned records. `/status` then reports
-`features.context` and `limits.maxContextBytes`. The context is used for that
-turn only and is never stored. It comes from the browser, so treat it like the
+`features.context` and `limits.maxContextBytes`. Without `StoreContext` the context is used for that
+turn only and never stored. With `StoreContext` it is kept on the user message
+(a `context` part the transcript returns, never sent to the model as history),
+and `Setup` receives the conversation's earlier contexts, oldest first and at
+most 30, as `TurnInput.EarlierContexts`: references a conversation
+accumulates. It comes from the browser, so treat it like the
 message text: it can't grant anything, and records it names should be read
 through permission-checked tools.
 
@@ -215,9 +227,36 @@ itself; only the host's hook does, so pick them from what the context says
 about the screen, not from numbers it carries. The `OwnerKey` in `TurnInput`
 names the user (`AuthCollectionID`, `UserID`) if the hook needs the record.
 
-**Failures.** A failed turn records one of `provider_error` (the provider
-refused the request or its stream broke), `max_steps`, `timeout`,
-`auth_expired`, `interrupted` or `internal_error`, with a generic message.
+To read what the context names *as the caller* (through the host's own
+permission-checked handlers), the hook resolves the signed-in user from
+`TurnInput.Identity`: `pb.ResolveTurnCaller(ctx, app, in)` validates the
+caller's token again and returns the same `Caller` a custom tool gets
+(`caller.RequestEvent` runs a handler as that user). `pbmcp.TurnPrincipal(in)`
+returns the principal itself. The identity lives only for the submission and
+is never stored.
+
+`TurnSetup` can also narrow the tools for one turn: `Tools: func(name string)
+bool` hides any tool it returns false for, from the tool list and from calls
+(a hidden tool is refused like one the caller doesn't have). It can only
+hide, never add. `ParallelToolCalls` (also on `RunnerConfig`) allows or
+forbids several tool calls in one model step: OpenAI's
+`parallel_tool_calls`, Anthropic's `disable_parallel_tool_use`.
+
+**Failures.** A failed turn records one of these codes, with a generic message:
+
+| Code | Meaning |
+|---|---|
+| `provider_error` | The provider refused the request or its stream broke |
+| `provider_auth` | The provider rejected its credentials (a wrong key, an expired plan sign-in) |
+| `usage_limit` | The account's quota or plan usage limit is used up |
+| `rate_limited` | Too many requests for now |
+| `context_too_long` | The input didn't fit the model's window, even after trimming (section 11) |
+| `output_limit` | The reply stopped at the output limit (`finish_reason: length`, `stop_reason: max_tokens`); the partial reply isn't stored as complete |
+| `content_filtered` | The provider withheld the reply (content filter or refusal) |
+| `empty_reply` | The final step had neither text nor tool calls |
+| `max_steps`, `timeout`, `auth_expired`, `interrupted`, `internal_error` | The turn's own limits and lifecycle |
+
+The browser binding maps each code to an actionable sentence.
 Provider text never reaches the transcript or the browser. Instead the runner
 logs one warning per failed turn (`chat: turn failed`) with the code, turn,
 conversation, provider id, model, effort and cause, through
@@ -290,6 +329,7 @@ mid-run doesn't stop the result from being recorded.
 
 ```text
 server proposals: pending → executing → succeeded | failed | unknown
+                  pending → executing → pending (refused before writing)
                   pending → rejected | expired
 editor proposals: pending → approved → applied | stale | failed | expired
                   pending → rejected | expired
@@ -297,6 +337,17 @@ editor proposals: pending → approved → applied | stale | failed | expired
 
 - `failed` means it definitely didn't apply (a refusal or a PocketBase
   validation error).
+- **Refused, fixable:** a custom tool's handler returns `pbmcp.Refused(msg)`
+  when it turned the change down before writing anything, for a reason the
+  user can fix (the host's handler answered 400, say). The approval then
+  answers `422 refused` with the message, and the proposal goes back to
+  `pending` (undecided) at a new revision with the message as its `failure`.
+  Editing the arguments clears that failure and any warnings, which
+  described the old arguments.
+  The user can then reject it, approve it again once the cause is fixed
+  elsewhere, or, with `AllowArgumentEdits`, edit the arguments and approve.
+  Without edits, approving unchanged arguments meets the same refusal. On
+  MCP, `Refused` is an ordinary tool error.
 - `unknown` means it may or may not have applied: a timeout after the change
   was sent, or a crash before the result was saved. It is never retried
   automatically.
@@ -308,6 +359,20 @@ collection, record or editor they target, and are stored as a new revision.
 
 **Auto-approval.** A tool marked `Approval: "auto"` runs immediately when the
 host sets `AutoApprove`, still under every other check.
+
+**Preparing and warning.** Two `ToolSpec` hooks shape a proposal when the
+model's call becomes one:
+
+- `Prepare(ctx, principal, args) (args, error)` returns the arguments the
+  proposal stores, before they are validated and reviewed: for example a
+  snapshot of a draft's files, so the reviewer approves exactly those and not
+  whatever the draft holds later. It runs once; an edited or approved
+  proposal runs the stored arguments. It may read the host's data, not change
+  it.
+- `Warn(ctx, principal, args) []string` returns notes about the change (at
+  most 10, each cut to 500 characters). They are stored on the proposal
+  (`warnings`), shown on its card and sent to the model with the pending
+  result. They never block it; `Validate` refuses.
 
 ## 6. Editor tools
 
@@ -371,8 +436,12 @@ a message by its upload ID (up to 5 per message).
 - **To the model:** a turn sends the newest attachments first, up to 20 MiB
   per request. Text is labelled as data, not instructions. A file that
   doesn't fit, was deleted or isn't supported by the provider becomes a short
-  "omitted" note. `/status` lists only the types the configured provider
-  supports.
+  "omitted" note. `/status` lists the types the configured provider
+  supports, plus the other image types when `AcceptOtherImages` is on.
+- **Other images:** `AcceptOtherImages` also stores BMP, TIFF, ICO, HEIC and
+  AVIF images (recognized by their signatures; SVG is never accepted, as it
+  can carry scripts). A model whose provider can't read one is told the file
+  was omitted; the user can still download it.
 
 ## 8. Model providers
 
@@ -465,6 +534,29 @@ The settings API follows these rules:
   choice if it pointed there. A refresh still running for that provider can't
   write its credentials back.
 
+### Host-owned provider settings
+
+A host with its own settings page can keep it. Pass a `catalog.Store` over the
+host's settings as `ChatConfig.ProviderStore`, without `ManageProviders`: the
+catalog loads from it, and no admin routes are mounted. After the host's
+settings change, call `srv.ChatRouter()` and its `Reload(ctx)`.
+
+For a ChatGPT plan provider, only one side may refresh the sign-in: a refresh
+replaces the refresh token, so two refreshers log each other out. A store that
+also implements `catalog.CodexTokenStore` (`CodexToken(ctx, scope, id,
+forceRefresh)` and `CodexSignedIn`) keeps that with the host: the router asks
+it for each request's token (and once more with `forceRefresh` after a 401),
+never signs in or refreshes itself, and leaves the provider out of the
+choices while the host isn't signed in.
+
+**Output limits on OpenAI-compatible APIs.** Chat Completions sends
+`max_completion_tokens` (current OpenAI models refuse `max_tokens`). A server
+that refuses the field gets the request once more without a limit.
+`openai.Config.MaxTokensField: "max_tokens"` keeps the old field for servers
+that only know it; in a catalog it is `catalog.Provider.MaxTokensField`, set
+by a static or host-owned catalog (the managed settings API doesn't expose it
+yet).
+
 ### Model discovery
 
 The settings API fetches a provider's `/models` endpoint on demand; an explicit
@@ -523,6 +615,8 @@ Pick the title model in one of three places (first match wins):
    back to the turn's model.
 2. **`ChatConfig.TitleModel`** in the adapters (`MCP_CHAT_TITLE_MODEL` in the
    examples): `auto`, `off`, a choice id (`provider::model`) or a model id.
+   `first-message` titles with the first message itself, cleaned and cut to
+   60 characters, with no model call (the admin setting doesn't apply then).
 3. **`RunnerConfig.Titles`** (`chat.TitleConfig`) for a custom runner: a
    `Model` func, `Timeout` and `Wait`.
 
@@ -630,14 +724,18 @@ counts are estimated (about 3.5 characters a token, on the high side) and
 corrected per conversation from the input tokens providers report. When the
 history doesn't fit, it shrinks in this order:
 
-1. every tool result is cut to `MaxToolResultTokens`;
+1. tool results from earlier turns are cut to `MaxToolResultTokens`;
 2. tool results older than the last `KeepFullToolTurns` user turns become a
    stub that names the tool and its size (the model can call it again);
 3. older attachments are left out (the model sees an omission note);
 4. the oldest messages are dropped, never the current turn, never a tool
    result without its call, and never a proposal still waiting for its
    decision;
-5. the current turn's earlier tool results become stubs.
+5. the current turn's earlier tool results become stubs;
+6. the current turn's remaining results are cut to `MaxToolResultTokens`.
+
+So a result the model asked for in this turn (a schema it must read in full,
+say) reaches it whole, unless nothing else is left to remove.
 
 **Overflow.** If the provider still says the prompt is too long (Anthropic's
 400 "prompt is too long", OpenAI's `context_length_exceeded`), the step is
@@ -679,3 +777,34 @@ conversation holds, so it can pass `window`. `/status` reports
 `features.compaction`. The browser binding draws it as agent-panel's context
 ring with a **Compact** button, and marks where the summary ends in the
 transcript (see the [client README](../frontend/client/README.md)).
+
+## 12. Importing history
+
+Conversations from another chat system can be brought in, once, as ordinary
+conversations: they list, open and continue like any other. Both bundled
+stores implement `chat.ImportStore`.
+
+- **From the server** (a host's own tables): `chat.ImportConversation(ctx,
+  store, owner, chat.ImportedConversation{SourceID, Title, Target, CreatedAt,
+  Messages})`. Messages keep their roles, times, text, tool calls and results,
+  attachment names (the bytes aren't imported; the model is told the file was
+  omitted) and the outcomes of past proposals as `proposal_outcome` notices.
+  The proposals themselves aren't imported, so nothing old is actionable.
+- **From the browser** (threads kept in `localStorage`): with `Imports` on,
+  `POST /conversations/actions/import` takes `{sourceId, title?, createdAt?,
+  messages: [{role: "user" | "assistant", text, createdAt?}]}`, up to 8 MiB
+  (`MaxImportBytes`). Each message must also fit the store's message limit:
+  4 MiB on stock PocketBase and on the fork with PostgreSQL, 60 KiB on the
+  fork with MySQL (whose `TEXT` column stops at 64 KiB). A larger one makes
+  the import a `400` naming the message. Only user and assistant text is accepted, so a browser
+  can't write tool results or notices. The client method is
+  `client.importConversation(...)`.
+
+An import is one transaction and idempotent per owner and `SourceID`: a
+repeat returns the first conversation (`created: false`, `200` instead of
+`201`) and writes nothing. The bundled stores serialize imports within one
+server process, so two tabs importing the same thread at once store it once;
+servers sharing a database don't coordinate imports. Messages keep their order: one without a time, or
+with a time before the previous one's, is placed a millisecond after it. An
+untitled import is titled from its first user message. At most 2,000 messages
+and 32 MiB per import.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"mime/multipart"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -427,5 +428,39 @@ func TestUploadPartJSONShape(t *testing.T) {
 	want := `{"type":"attachment","uploadId":"u1","name":"a.txt","mime":"text/plain"}`
 	if string(raw) != want {
 		t.Fatalf("attachment part JSON = %s, want %s", raw, want)
+	}
+}
+
+func TestOtherImageTypes(t *testing.T) {
+	bmp := append([]byte("BM"), make([]byte, 60)...)
+	heic := append([]byte{0, 0, 0, 24}, []byte("ftypheic")...)
+	heic = append(heic, make([]byte, 20)...)
+
+	off := newFixture(t, fixtureOptions{uploads: true})
+	conv := off.createConversation(nil)
+	off.postMultipart(tokenA, conv.ID, "scan.bmp", bmp, nil).expect(http.StatusUnsupportedMediaType)
+
+	prov := scripted.New(textStep("I can't see that one."))
+	f := newFixture(t, fixtureOptions{uploads: true, otherImages: true, provider: prov.SupportOnly("image/png")})
+	conv = f.createConversation(nil)
+	up := f.uploadAs(tokenA, conv.ID, "scan.bmp", bmp)
+	if up.MIME != "image/bmp" || up.Kind != UploadKindImage {
+		t.Fatalf("upload = %+v", up)
+	}
+	if photo := f.uploadAs(tokenA, conv.ID, "IMG_1.heic", heic); photo.MIME != "image/heic" {
+		t.Fatalf("heic upload = %+v", photo)
+	}
+	status := decodeStatus(t, f.call(http.MethodGet, testPrefix+"/status", nil, nil).expect(http.StatusOK))
+	if types := *status.Limits.AttachmentTypes; !slices.Contains(types, "image/bmp") || !slices.Contains(types, "image/avif") {
+		t.Fatalf("attachment types = %v", types)
+	}
+	// A turn may carry it; the model is told it was omitted.
+	res := f.submitTurnWithAttachments(tokenA, conv.ID, "what is this?", []string{up.ID}).expect(http.StatusAccepted)
+	var out submitTurnView
+	res.decode(&out)
+	awaitTerminal(t, f.store, ownerFor("user-a"), out.Turn.ID)
+	last := prov.Requests()[0].Messages[len(prov.Requests()[0].Messages)-1]
+	if len(last.Attachments) != 0 || !strings.Contains(last.Text, "[attachment scan.bmp omitted]") {
+		t.Fatalf("model got %+v", last)
 	}
 }

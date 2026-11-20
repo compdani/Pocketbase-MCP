@@ -391,3 +391,30 @@ func eventOfType(t *testing.T, events []Event, want EventType) Event {
 	t.Fatalf("no %s event in %v", want, typesOf(events))
 	return Event{}
 }
+
+func TestRunnerProposalWarningsReachTheModel(t *testing.T) {
+	store := NewMemStore(MemStoreOptions{})
+	owner := ownerFixture()
+	conv := mustConversation(t, store, owner, "warnings")
+	call := provider.ToolCall{ID: "call-1", Name: "publish_flow", Arguments: json.RawMessage(`{"a":1}`)}
+	prov := scripted.New(toolCallStep(call), textStep("Queued, with a warning."))
+	runner := mustRunner(t, RunnerConfig{Store: store, Provider: prov, Model: "m", Proposals: store})
+	tools := &planningTools{planFn: func(_ context.Context, name string, args json.RawMessage) (*ProposalDraft, error) {
+		d := draftFor(name, args)
+		d.Warnings = []string{"the workflow has no trigger"}
+		return d, nil
+	}}
+	turn, _, err := runner.Submit(context.Background(), owner, conv.ID, "publish", "k", tools, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitTerminal(t, store, owner, turn.ID)
+	result := string(prov.Requests()[1].Messages[2].ToolResult)
+	if !strings.Contains(result, `"warnings":["the workflow has no trigger"]`) {
+		t.Fatalf("pending result = %s", result)
+	}
+	proposals, _, err := store.ListProposals(context.Background(), owner, conv.ID, nil, Page{})
+	if err != nil || len(proposals) != 1 || len(proposals[0].Warnings) != 1 {
+		t.Fatalf("stored proposals = %+v err = %v", proposals, err)
+	}
+}

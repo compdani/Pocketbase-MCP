@@ -70,3 +70,29 @@ func TestRouterCompactionModel(t *testing.T) {
 		r.Close()
 	}
 }
+
+func TestMaxTokensFieldIsValidated(t *testing.T) {
+	base := Provider{ID: "a", Kind: KindOpenAI, Enabled: true, BaseURL: "https://example.test/v1", Models: []Model{{ID: "m"}}}
+	ok := base
+	ok.MaxTokensField = "max_tokens"
+	if err := ok.Normalized().Validate(); err != nil {
+		t.Fatalf("max_tokens refused: %v", err)
+	}
+	bad := base
+	bad.MaxTokensField = "max_output"
+	if err := bad.Normalized().Validate(); err == nil {
+		t.Fatal("an unknown field was accepted")
+	}
+	anth := Provider{ID: "b", Kind: KindAnthropic, Enabled: true, Models: []Model{{ID: "m"}}, MaxTokensField: "max_tokens"}
+	if err := anth.Normalized().Validate(); err == nil {
+		t.Fatal("a max tokens field on an anthropic provider was accepted")
+	}
+}
+
+func TestMaxTokensFieldOnlyOnChatCompletions(t *testing.T) {
+	p := Provider{ID: "a", Kind: KindOpenAI, Enabled: true, BaseURL: "https://example.test/v1", WireAPI: "responses",
+		Models: []Model{{ID: "m"}}, MaxTokensField: "max_tokens"}
+	if err := p.Normalized().Validate(); err == nil {
+		t.Fatal("a max tokens field on the Responses wire was accepted")
+	}
+}

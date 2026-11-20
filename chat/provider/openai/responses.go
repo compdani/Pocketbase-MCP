@@ -29,6 +29,8 @@ type responsesRequest struct {
 	// Reasoning carries the effort for reasoning models; nil leaves the
 	// model's default.
 	Reasoning *responsesReasoning `json:"reasoning,omitempty"`
+	// ParallelToolCalls is only sent with tools, when the request sets it.
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
 }
 
 type responsesReasoning struct {
@@ -118,6 +120,7 @@ func (p *Provider) buildResponsesBody(req provider.Request) ([]byte, error) {
 			})
 		}
 		payload.Tools = tools
+		payload.ParallelToolCalls = req.ParallelToolCalls
 	}
 
 	body, err := json.Marshal(payload)
@@ -218,6 +221,7 @@ type responsesError struct {
 
 type responsesObject struct {
 	Model             string            `json:"model"`
+	Status            string            `json:"status"`
 	Output            []json.RawMessage `json:"output"`
 	Usage             *responsesUsage   `json:"usage"`
 	Error             *responsesError   `json:"error"`
@@ -330,6 +334,10 @@ func (p *Provider) consumeResponses(ctx context.Context, body io.Reader, ch chan
 		if sawToolCall {
 			stop = "tool_calls"
 		}
+		if resp.Status == "incomplete" && resp.IncompleteDetails != nil && resp.IncompleteDetails.Reason != "" {
+			// The runner turns these into output_limit or content_filtered.
+			stop = resp.IncompleteDetails.Reason
+		}
 		sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkDone, StopReason: stop})
 	}
 
@@ -387,8 +395,15 @@ func (p *Provider) consumeResponses(ctx context.Context, body io.Reader, ch chan
 			if event.Response != nil && event.Response.IncompleteDetails != nil {
 				reason = event.Response.IncompleteDetails.Reason
 			}
-			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf(
-				"openai: response incomplete: %s", truncate(reason))})
+			switch reason {
+			case "max_output_tokens", "content_filter":
+				// A known stop: end the stream with it, so the turn fails as
+				// output_limit or content_filtered rather than provider_error.
+				sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkDone, StopReason: reason})
+			default:
+				sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf(
+					"openai: response incomplete: %s", truncate(reason))})
+			}
 			return
 		case "error":
 			message, code := event.Message, ""
@@ -408,11 +423,17 @@ func (p *Provider) consumeResponses(ctx context.Context, body io.Reader, ch chan
 type streamedError struct {
 	text     string
 	overflow bool
+	kind     string
 }
 
 func (e *streamedError) Error() string         { return e.text }
 func (e *streamedError) ContextOverflow() bool { return e.overflow }
+func (e *streamedError) FailureKind() string   { return e.kind }
 
 func responsesFailure(text, code, message string) error {
-	return &streamedError{text: text, overflow: provider.LooksLikeContextOverflow(code, message)}
+	return &streamedError{
+		text:     text,
+		overflow: provider.LooksLikeContextOverflow(code, message),
+		kind:     provider.ClassifyFailure(0, code, message),
+	}
 }

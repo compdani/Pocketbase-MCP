@@ -3,11 +3,13 @@ package chat
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/compdani/pocketbase-mcp/chat/provider"
+	"github.com/compdani/pocketbase-mcp/chat/provider/scripted"
 )
 
 // titleProvider answers title requests (recognised by TitleSystemPrompt) with
@@ -233,5 +235,28 @@ func TestRunnerTitleFailureLeavesTheTurnAlone(t *testing.T) {
 	}
 	if got := conversationTitle(t, store, owner, conv.ID); got != "" {
 		t.Fatalf("title = %q, want none after a failure", got)
+	}
+}
+
+func TestFirstMessageTitlesNeedNoModel(t *testing.T) {
+	store := NewMemStore(MemStoreOptions{})
+	owner := ownerFixture()
+	conv := mustConversation(t, store, owner, "")
+	prov := scripted.New(textStep("sure"))
+	runner := mustRunner(t, RunnerConfig{Store: store, Provider: prov, Model: "m", Titles: &TitleConfig{FromMessage: true}})
+	turn, _, err := runner.Submit(context.Background(), owner, conv.ID, "  Draft the **spring** newsletter for VIP customers please, with a coupon\nand more", "k", nil, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitTerminal(t, store, owner, turn.ID)
+	got, err := store.GetConversation(context.Background(), owner, conv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title == "" || strings.Contains(got.Title, "\n") || len([]rune(got.Title)) > 61 {
+		t.Fatalf("title = %q", got.Title)
+	}
+	if n := len(prov.Requests()); n != 1 {
+		t.Fatalf("model requests = %d, want only the turn's", n)
 	}
 }

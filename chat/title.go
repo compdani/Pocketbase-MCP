@@ -20,6 +20,9 @@ const (
 	TitleChoiceAuto = "auto"
 	// TitleChoiceOff leaves conversations untitled until a user renames them.
 	TitleChoiceOff = "off"
+	// TitleChoiceFirstMessage titles a conversation with its first message,
+	// cut to a title's length, without a model call.
+	TitleChoiceFirstMessage = "first-message"
 )
 
 // TitleConfig turns on automatic conversation titles: when a turn is submitted
@@ -30,6 +33,10 @@ type TitleConfig struct {
 	// Disabled turns titling off. A nil *TitleConfig is also off; this field
 	// lets a host opt out where an adapter would otherwise enable titles.
 	Disabled bool
+	// FromMessage titles with the first message itself (its first line,
+	// cleaned and cut like a generated title), with no model call. Model,
+	// Timeout and Wait are then unused.
+	FromMessage bool
 	// Model picks the model for one title, given the turn's own model.
 	// ok=false skips the title. Nil means the turn's model.
 	Model func(ctx context.Context, turn ResolvedModel) (ResolvedModel, bool)
@@ -77,6 +84,14 @@ func (r *Runner) startTitle(owner OwnerKey, conversationID, text string, attachm
 	}
 	conv, err := r.cfg.Store.GetConversation(context.Background(), owner, conversationID)
 	if err != nil || strings.TrimSpace(conv.Title) != "" {
+		return nil
+	}
+	if cfg.FromMessage {
+		if title := CleanTitle(input); title != "" {
+			if _, err := r.cfg.Store.RenameConversation(context.Background(), owner, conversationID, title); err != nil {
+				r.cfg.Logger.Warn("chat: conversation title not stored", "conversation", conversationID, "error", err.Error())
+			}
+		}
 		return nil
 	}
 	model := turn

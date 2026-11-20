@@ -1571,3 +1571,51 @@ func TestProposalEditorApproveRestartsDeadline(t *testing.T) {
 		t.Fatalf("expiresAt = %s, want about %s (decision + TTL)", out.Proposal.ExpiresAt, want)
 	}
 }
+
+func TestProposalDecisionRefusedStaysPending(t *testing.T) {
+	f, exec := newProposalFixture(t, fixtureOptions{})
+	attempts := 0
+	exec.execFn = func(context.Context, Proposal) (json.RawMessage, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, RefusedError{Message: "The subject line is required."}
+		}
+		return json.RawMessage(`{"ok":true}`), nil
+	}
+	owner := ownerFor("user-a")
+	conv := f.createConversation(nil)
+	p := mustProposal(t, f.store, owner, serverProposal(conv.ID))
+
+	res := f.decide(p.ID, "approve", p.Revision, nil).expect(http.StatusUnprocessableEntity)
+	var refused proposalErrorView
+	res.decode(&refused)
+	if refused.Error.Code != CodeRefused || refused.Error.Message != "The subject line is required." {
+		t.Fatalf("error = %+v", refused.Error)
+	}
+	if refused.Proposal == nil || refused.Proposal.State != ProposalStatePending || refused.Proposal.Failure != "The subject line is required." {
+		t.Fatalf("proposal = %+v, want pending with the reason", refused.Proposal)
+	}
+	if refused.Proposal.DecidedAt != nil {
+		t.Fatalf("a pending proposal carries decidedAt %v", refused.Proposal.DecidedAt)
+	}
+	if refused.Proposal.Revision <= p.Revision {
+		t.Fatalf("revision %d did not advance from %d", refused.Proposal.Revision, p.Revision)
+	}
+	// No outcome notice: nothing was decided.
+	for _, m := range f.messages(owner, conv.ID) {
+		if m.Role == RoleNotice {
+			t.Fatalf("a refused approval left a notice: %+v", m)
+		}
+	}
+	// The old revision can't approve it again; the new one can, and the
+	// refusal message is gone once it succeeds.
+	f.decide(p.ID, "approve", p.Revision, nil).expect(http.StatusConflict)
+	var ok decisionView
+	f.decide(p.ID, "approve", refused.Proposal.Revision, nil).expect(http.StatusOK).decode(&ok)
+	if ok.Proposal.State != ProposalStateSucceeded || ok.Proposal.Failure != "" {
+		t.Fatalf("second approval = %s %q", ok.Proposal.State, ok.Proposal.Failure)
+	}
+	if _, executions, _ := exec.counts(); executions != 2 {
+		t.Fatalf("executions = %d, want 2", executions)
+	}
+}

@@ -59,6 +59,10 @@ const (
 	CodeTurnRefused = "turn_refused"
 	// CodeTooSoon reports a summary asked for moments after the previous one.
 	CodeTooSoon = "too_soon"
+	// CodeRefused reports an approved change the tool refused before writing
+	// anything. The proposal is pending again (it accompanies the error) with
+	// the reason as its failure, so the user can fix it and approve again.
+	CodeRefused = "refused"
 )
 
 // Fixed, user-safe error messages. Server-internal error text is never echoed.
@@ -97,6 +101,7 @@ const (
 
 const (
 	defaultMaxBodyBytes      = 64 << 10
+	defaultMaxImportBytes    = 8 << 20
 	defaultMaxContextBytes   = 16 << 10
 	defaultMaxMessageChars   = 16000
 	defaultHeartbeatInterval = 15 * time.Second
@@ -123,6 +128,11 @@ type Caller struct {
 	Tools ToolExecutor
 	// Expires is the caller credential's expiry; zero means unknown.
 	Expires time.Time
+	// Identity is the host's own description of the caller (the bundled
+	// authenticator puts the pbmcp.Principal here). It is handed to
+	// RunnerConfig.Setup as TurnInput.Identity so the hook can act as the
+	// caller, and is never stored or logged.
+	Identity any
 }
 
 // Authenticator resolves the caller of one request from the request itself, for
@@ -172,6 +182,21 @@ type HandlerConfig struct {
 	// MaxContextBytes bounds a turn's context, as sent. Zero means 16 KiB. It
 	// counts toward MaxBodyBytes too.
 	MaxContextBytes int
+	// AcceptOtherImages stores image formats beyond PNG, JPEG, GIF and WebP
+	// (OtherImageTypes: BMP, TIFF, ICO, HEIC, AVIF). A model that can't read
+	// one is told the file was omitted; the user can still download it.
+	AcceptOtherImages bool
+	// Imports serves POST /conversations/actions/import, which lets a user bring
+	// conversations their browser kept (plain user and assistant text) into
+	// their own server-side history. The store must implement ImportStore.
+	Imports bool
+	// MaxImportBytes bounds one import request. Zero means 8 MiB.
+	MaxImportBytes int64
+	// StoreContext stores each turn's context on its user message (a
+	// PartContext part, returned with the transcript) and gives Setup the
+	// conversation's earlier contexts (TurnInput.EarlierContexts). It
+	// requires TurnContext.
+	StoreContext bool
 	// TargetCheck validates a client-supplied target reference for this
 	// caller. Nil means targets are not supported at all: creating a targeted
 	// conversation or filtering by target is rejected. It is re-run on every
@@ -246,6 +271,17 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 	}
 	if cfg.MaxContextBytes <= 0 {
 		cfg.MaxContextBytes = defaultMaxContextBytes
+	}
+	if cfg.Imports {
+		if _, ok := cfg.Store.(ImportStore); !ok {
+			return nil, errors.New("chat: Imports requires a store that implements ImportStore")
+		}
+		if cfg.MaxImportBytes <= 0 {
+			cfg.MaxImportBytes = defaultMaxImportBytes
+		}
+	}
+	if cfg.StoreContext && !cfg.TurnContext {
+		return nil, errors.New("chat: StoreContext requires TurnContext")
 	}
 	if cfg.DecisionTimeout <= 0 {
 		cfg.DecisionTimeout = defaultDecisionTimeout
@@ -452,6 +488,7 @@ func (h *handler) routes() *http.ServeMux {
 		{http.MethodGet, p + "/status", h.serveStatus},
 		{http.MethodGet, p + "/conversations", h.listConversations},
 		{http.MethodPost, p + "/conversations", h.createConversation},
+		{http.MethodPost, p + "/conversations/actions/import", h.importConversation},
 		{http.MethodGet, p + "/conversations/{id}", h.getConversation},
 		{http.MethodPatch, p + "/conversations/{id}", h.renameConversation},
 		{http.MethodDelete, p + "/conversations/{id}", h.deleteConversation},
@@ -636,6 +673,11 @@ func (h *handler) requireCaller(w http.ResponseWriter, r *http.Request) (Caller,
 // decodeBody reads one bounded JSON document into dst. Unknown fields and
 // trailing data are rejected so a typo can never be silently ignored.
 func (h *handler) decodeBody(w http.ResponseWriter, r *http.Request, allowEmpty bool, dst any) bool {
+	return h.decodeBodyLimit(w, r, allowEmpty, h.cfg.MaxBodyBytes, dst)
+}
+
+// decodeBodyLimit is decodeBody with its own size limit.
+func (h *handler) decodeBodyLimit(w http.ResponseWriter, r *http.Request, allowEmpty bool, limit int64, dst any) bool {
 	if r.Body == nil {
 		if allowEmpty {
 			return true
@@ -643,7 +685,7 @@ func (h *handler) decodeBody(w http.ResponseWriter, r *http.Request, allowEmpty 
 		h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -992,7 +1034,7 @@ func (h *handler) createUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := SanitizeUploadName(filename)
-	mimeType, kind, ok := DetectUpload(name, data)
+	mimeType, kind, ok := DetectUploadWith(name, data, h.cfg.AcceptOtherImages)
 	if !ok {
 		h.writeError(w, http.StatusUnsupportedMediaType, CodeUnsupportedMedia, msgUnsupportedMedia)
 		return
@@ -1144,7 +1186,9 @@ func (h *handler) turnAttachments(w http.ResponseWriter, r *http.Request, caller
 			support, ok := target.Provider.(provider.AttachmentSupport)
 			supported = ok && support.SupportsAttachment(upload.MIME)
 		}
-		if !supported {
+		if !supported && !(h.cfg.AcceptOtherImages && isOtherImageType(upload.MIME)) {
+			// An accepted "other" image is still sent: the runner tells the
+			// model it was omitted, and the user keeps the file.
 			h.writeError(w, http.StatusBadRequest, CodeUnsupportedAttachment, msgUnsupportedAttach)
 			return nil, false
 		}
@@ -1187,6 +1231,9 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 		// ready providers. Each choice lists what it can send, and a turn is
 		// checked against its resolved provider.
 		types := attachmentTypesFor(h.cfg.Runner.SupportsAttachment)
+		if h.cfg.AcceptOtherImages {
+			types = append(types, OtherImageTypes...)
+		}
 		limits.AttachmentTypes = &types
 	}
 	h.writeJSON(w, http.StatusOK, statusView{
@@ -1624,7 +1671,9 @@ func (h *handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 		Target:         target,
 		Tools:          caller.Tools,
 		Deadline:       caller.Expires,
+		Identity:       caller.Identity,
 		Context:        turnContext,
+		StoreContext:   h.cfg.StoreContext,
 		// gateConversation checked the caller may still use the target.
 		ConversationTarget: conv.Target,
 	})
@@ -1797,4 +1846,78 @@ func (h *handler) turnEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// importRequest is a browser-kept thread. Only user and assistant text is
+// accepted from a browser: tool results and proposal outcomes are the
+// server's to write.
+type importRequest struct {
+	SourceID  *string             `json:"sourceId"`
+	Title     *string             `json:"title"`
+	CreatedAt *time.Time          `json:"createdAt"`
+	Messages  []importMessageBody `json:"messages"`
+}
+
+type importMessageBody struct {
+	Role      string     `json:"role"`
+	Text      string     `json:"text"`
+	CreatedAt *time.Time `json:"createdAt"`
+}
+
+type importView struct {
+	Conversation Conversation `json:"conversation"`
+	Created      bool         `json:"created"`
+}
+
+// importConversation stores a thread the caller's browser kept. A repeated
+// sourceId returns the earlier import (200) instead of a copy (201).
+func (h *handler) importConversation(w http.ResponseWriter, r *http.Request) {
+	caller, ok := h.requireCaller(w, r)
+	if !ok {
+		return
+	}
+	if !h.cfg.Imports {
+		h.writeError(w, http.StatusNotFound, CodeNotFound, msgNotFound)
+		return
+	}
+	var body importRequest
+	if !h.decodeBodyLimit(w, r, false, h.cfg.MaxImportBytes, &body) {
+		return
+	}
+	if body.SourceID == nil {
+		h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
+		return
+	}
+	in := ImportedConversation{SourceID: *body.SourceID}
+	if body.Title != nil {
+		in.Title = *body.Title
+	}
+	if body.CreatedAt != nil {
+		in.CreatedAt = *body.CreatedAt
+	}
+	for _, m := range body.Messages {
+		if (m.Role != RoleUser && m.Role != RoleAssistant) || strings.TrimSpace(m.Text) == "" {
+			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, "Only user and assistant messages with text can be imported.")
+			return
+		}
+		msg := Message{Role: m.Role, Parts: []Part{{Type: PartText, Text: m.Text}}}
+		if m.CreatedAt != nil {
+			msg.CreatedAt = *m.CreatedAt
+		}
+		in.Messages = append(in.Messages, msg)
+	}
+	conv, created, err := h.cfg.Store.(ImportStore).ImportConversation(r.Context(), caller.Owner, in)
+	switch {
+	case errors.Is(err, ErrInvalidImport):
+		h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, "The import is invalid: "+strings.TrimPrefix(err.Error(), ErrInvalidImport.Error()+": ")+".")
+		return
+	case err != nil:
+		h.storeError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	h.writeJSON(w, status, importView{Conversation: conv, Created: created})
 }

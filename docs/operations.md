@@ -15,9 +15,11 @@ Updated 2026-11-19.
 | Go toolchain | `go1.26.5`. Modules that depend on PocketBase (adapters, `auth/stockoauth`, examples) declare `go 1.27` and switch to `go1.27.0` automatically. |
 | Databases tested | SQLite (stock), PostgreSQL 14 (fork). **MySQL is untested.** |
 
-Each adapter and example picks its PocketBase with its own `go.mod`
-`replace` directive. Never use a `go.work` that includes both adapters or both
-examples.
+Each adapter and example picks its PocketBase with its own `go.mod` (the fork
+through a `replace`). The repository's `go.work` includes both adapters and
+both examples; that works because stock PocketBase and the fork have different
+module paths. If the fork moves to stock's path, the workspace must drop one of
+them.
 
 To try unmerged fork changes, point the fork modules at a local checkout for
 the time being (`go mod edit -replace github.com/pocketbase/pocketbase=../path/to/pb-postgress`)
@@ -103,8 +105,8 @@ yet ([roadmap.md](roadmap.md)).
 ## Running the tests
 
 ```sh
-GOWORK=off go test -race ./...                               # root module
-(cd adapters/pocketbase && GOWORK=off go test -race ./...)   # stock adapter
+go test -race ./...                               # root module
+(cd adapters/pocketbase && go test -race ./...)   # stock adapter
 (cd frontend/client && node --test)                          # browser client
 ```
 
@@ -116,12 +118,51 @@ pg_ctl -D /tmp/pgtest -o "-p 55461 -k ''" -w start
 createdb -h 127.0.0.1 -p 55461 -U postgres pbmcp_test
 (cd adapters/pbpostgress && \
   PB_DB_DSN='postgres://postgres@127.0.0.1:55461/pbmcp_test?sslmode=disable' \
-  GOWORK=off go test -race -p 1 ./...)
+  go test -race -p 1 ./...)
 pg_ctl -D /tmp/pgtest -m fast -w stop && rm -rf /tmp/pgtest
 ```
 
 The fork tests turn request logging off (`Logs.MaxDays = 0`) to avoid a data
 race in the fork's own background logging; the real fix belongs in the fork.
+
+The repository's `go.work` joins the root module, the submodules and the
+examples, so these run against the checkout. The examples also keep their own
+`replace` lines, so `GOWORK=off go build` works in them (for a Docker build of
+an example). The submodules don't: they require the released root version,
+which only exists once it is tagged.
+
+## Releasing
+
+The root module and the submodules (`auth/stockoauth`, `adapters/pocketbase`,
+`adapters/pbpostgress`) are released together, with one version:
+
+1. Set every submodule's `require` of `github.com/compdani/pocketbase-mcp` (and
+   `adapters/pocketbase`'s `auth/stockoauth`) to the new version. No
+   `replace` for this repo goes in a submodule's `go.mod`: Go ignores a
+   dependency's replaces, so another module would fail to build.
+2. Run the tests above, then commit.
+3. `scripts/release-tags.sh v0.1.6` checks the requires and creates the tags
+   `v0.1.6`, `auth/stockoauth/v0.1.6`, `adapters/pocketbase/v0.1.6` and
+   `adapters/pbpostgress/v0.1.6` on that commit. It prints the push command.
+4. After pushing, `GOWORK=off go mod tidy` in each submodule records the
+   root's checksum in its `go.sum` (a follow-up commit).
+
+**Message size on the fork.** On PostgreSQL a chat message (and any other
+stored JSON payload) may now be up to 4 MiB, as on stock PocketBase; it was
+60 KiB, a limit only MySQL needs. The fork store raises the field maximum of
+an existing install in place on startup; the column type doesn't change.
+MySQL keeps 60 KiB.
+
+**Upgrading to v0.1.6.** Passing `ChatConfig.ProviderStore` now turns on the
+provider catalog by itself (a host-owned catalog, without the admin routes).
+A host that passed it together with a single `Provider` or a custom runner,
+where it used to be ignored, now fails at startup: drop one of the two.
+
+A host then needs only `go get
+github.com/compdani/pocketbase-mcp/adapters/pocketbase@v0.1.6`. A host on the
+fork also needs the adapter's `replace github.com/pocketbase/pocketbase =>
+github.com/compdani/pb-postgress v0.41.6` in its own `go.mod`, because that
+replace is not inherited either.
 
 ## Migrating from customjs
 

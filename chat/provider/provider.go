@@ -82,6 +82,10 @@ type Request struct {
 	// means the model's default. Only providers that advertise efforts for a
 	// model accept it; others refuse the request rather than drop it.
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+	// ParallelToolCalls, when set, allows (true) or forbids (false) several
+	// tool calls in one model step. Nil leaves the provider's default.
+	// Adapters send it only when the request offers tools.
+	ParallelToolCalls *bool `json:"parallelToolCalls,omitempty"`
 }
 
 // ReasoningEfforts are the effort levels a request may name, lowest first.

@@ -36,6 +36,14 @@ const (
 	// FailureContextTooLong reports a turn whose input still did not fit the
 	// model's context window after the history was cut down and retried.
 	FailureContextTooLong = "context_too_long"
+	// FailureOutputLimit reports a reply the model stopped at its output
+	// limit. The partial reply is not stored as if it were complete.
+	FailureOutputLimit = "output_limit"
+	// FailureContentFiltered reports a reply the provider withheld (a content
+	// filter or a refusal stop).
+	FailureContentFiltered = "content_filtered"
+	// FailureEmptyReply reports a final step with neither text nor tool calls.
+	FailureEmptyReply = "empty_reply"
 )
 
 const (
@@ -69,6 +77,12 @@ func failureMessage(code string) string {
 		return "The turn was interrupted."
 	case FailureContextTooLong:
 		return "The conversation is too long for the selected model."
+	case FailureOutputLimit:
+		return "The reply was cut off at the model's output limit."
+	case FailureContentFiltered:
+		return "The provider withheld the reply."
+	case FailureEmptyReply:
+		return "The model returned an empty reply."
 	default:
 		return "The turn failed."
 	}
@@ -80,7 +94,26 @@ var ErrShutdown = errors.New("chat: runner is shut down")
 var (
 	errStreamTruncated = errors.New("chat: provider stream ended without a done chunk")
 	errStreamFailed    = errors.New("chat: provider reported an error")
+	errOutputLimit     = errors.New("chat: the reply stopped at the output limit")
+	errContentFiltered = errors.New("chat: the provider withheld the reply")
+	errEmptyReply      = errors.New("chat: the model returned an empty reply")
 )
+
+// stopReasonError maps a provider's stop reason to the failure it means, or
+// nil for a normal stop. The adapters pass the vendor's own words through.
+func stopReasonError(reason string) error {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_output_tokens":
+		return errOutputLimit
+	case "model_context_window_exceeded":
+		// The input filled the window: a context overflow, which the step
+		// retries with a shorter history, not an output limit.
+		return provider.ErrContextOverflow
+	case "content_filter", "refusal", "safety":
+		return errContentFiltered
+	}
+	return nil
+}
 
 // RunnerConfig configures a Runner. Zero values take the documented defaults.
 type RunnerConfig struct {
@@ -134,6 +167,10 @@ type RunnerConfig struct {
 	// Model is nil and Router implements CompactionRouter, the router picks
 	// the model.
 	Compaction *CompactionConfig
+	// ParallelToolCalls, when set, allows or forbids several tool calls in one
+	// model step (OpenAI parallel_tool_calls, Anthropic
+	// disable_parallel_tool_use). Nil leaves the provider's default.
+	ParallelToolCalls *bool
 	// MaxOutputTokens bounds the tokens one model step may generate. Zero
 	// leaves the provider's default (the Anthropic adapter's own default).
 	// The Responses wire and the ChatGPT/Codex plan route do not accept an
@@ -466,6 +503,11 @@ type SubmitOptions struct {
 	Context json.RawMessage
 	// ConversationTarget is the conversation's target, for Setup.
 	ConversationTarget string
+	// Identity is the caller's Caller.Identity, for Setup. Never stored.
+	Identity any
+	// StoreContext stores Context on the user message (PartContext) and
+	// gives Setup the conversation's earlier contexts.
+	StoreContext bool
 }
 
 // SubmitWithOptions is the option-taking form of Submit. It exists because a
@@ -512,6 +554,8 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 		Model:              resolved.Model,
 		Effort:             effort,
 		ContextWindow:      r.windowFor(resolved),
+		Identity:           opts.Identity,
+		EarlierContexts:    r.earlierContexts(ctx, owner, conversationID, opts.StoreContext),
 	})
 	if err != nil {
 		return Turn{}, false, err
@@ -541,6 +585,9 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 			MIME:     u.MIME,
 		})
 	}
+	if opts.StoreContext && hasContextObject(opts.Context) {
+		parts = append(parts, Part{Type: PartContext, Result: cloneRaw(opts.Context)})
+	}
 	if _, err := r.cfg.Store.AppendMessage(storeCtx, owner, Message{
 		ConversationID: conversationID,
 		TurnID:         turn.ID,
@@ -566,7 +613,7 @@ func (r *Runner) SubmitWithOptions(ctx context.Context, owner OwnerKey, conversa
 		providerID:     resolved.Choice.Provider,
 		model:          resolved.Model,
 		effort:         effort,
-		tools:          opts.Tools,
+		tools:          filterTools(opts.Tools, settings.tools),
 		deadline:       opts.Deadline,
 		settings:       settings,
 		resolved:       resolved,
@@ -927,6 +974,12 @@ func (r *Runner) runTurn(ctx context.Context, cancel context.CancelFunc, j *turn
 		}
 		r.recordStep(j)
 
+		if len(calls) == 0 && strings.TrimSpace(text) == "" {
+			// Checked before anything is stored, so a failed turn leaves no
+			// empty assistant message behind.
+			r.failJob(j, FailureEmptyReply, errEmptyReply)
+			return
+		}
 		parts := make([]Part, 0, 1+len(calls))
 		if text != "" {
 			parts = append(parts, Part{Type: PartText, Text: text})
@@ -1016,6 +1069,9 @@ func (r *Runner) consume(ctx context.Context, j *turnJob, ch <-chan provider.Chu
 				return text.String(), calls, err
 			}
 		case provider.ChunkDone:
+			if err := stopReasonError(chunk.StopReason); err != nil {
+				return text.String(), calls, fmt.Errorf("%w (stop reason %q)", err, chunk.StopReason)
+			}
 			return text.String(), calls, nil
 		case provider.ChunkError:
 			if chunk.Err != nil {
@@ -1156,6 +1212,7 @@ func (r *Runner) recordProposal(ctx context.Context, j *turnJob, call provider.T
 		Arguments:        canonical,
 		ArgumentsHash:    hash,
 		Summary:          draft.Summary,
+		Warnings:         draft.Warnings,
 		ExpiresAt:        r.now().Add(r.cfg.ProposalTTL),
 	})
 	if err != nil {
@@ -1211,14 +1268,16 @@ func (r *Runner) recordProposal(ctx context.Context, j *turnJob, call provider.T
 // change, and never implies that anything was applied.
 func proposalPendingResult(p Proposal) (json.RawMessage, error) {
 	return json.Marshal(struct {
-		Status     string `json:"status"`
-		ProposalID string `json:"proposalId"`
-		Summary    string `json:"summary"`
-		Note       string `json:"note"`
+		Status     string   `json:"status"`
+		ProposalID string   `json:"proposalId"`
+		Summary    string   `json:"summary"`
+		Warnings   []string `json:"warnings,omitempty"`
+		Note       string   `json:"note"`
 	}{
 		Status:     "pending_review",
 		ProposalID: p.ID,
 		Summary:    p.Summary,
+		Warnings:   p.Warnings,
 		Note:       proposalPendingNote,
 	})
 }
@@ -1440,12 +1499,13 @@ func (r *Runner) buildRequest(ctx context.Context, j *turnJob) (provider.Request
 	j.lastEstimate = overhead + tokens
 	j.usageSeen = false
 	return provider.Request{
-		Model:           j.model,
-		System:          j.settings.system,
-		Messages:        messages,
-		Tools:           defs,
-		MaxOutputTokens: j.settings.maxOutputTokens,
-		ReasoningEffort: j.effort,
+		Model:             j.model,
+		System:            j.settings.system,
+		Messages:          messages,
+		Tools:             defs,
+		MaxOutputTokens:   j.settings.maxOutputTokens,
+		ReasoningEffort:   j.effort,
+		ParallelToolCalls: j.settings.parallelToolCalls,
 	}, nil
 }
 

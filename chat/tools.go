@@ -89,6 +89,13 @@ func toolFailureMessage(err error) (string, bool) {
 		}
 		return value.Message, true
 	}
+	var refused RefusedError
+	if errors.As(err, &refused) {
+		if refused.Message == "" {
+			return toolGenericFailure, true
+		}
+		return refused.Message, true
+	}
 	var pointer *ToolError
 	if errors.As(err, &pointer) && pointer != nil {
 		if pointer.Message == "" {
@@ -102,3 +109,16 @@ func toolFailureMessage(err error) (string, bool) {
 // toolGenericFailure is the only text an unexpected tool error contributes to
 // the transcript, the event stream or the model context.
 const toolGenericFailure = "Tool failed."
+
+// RefusedError reports that a tool refused an approved change before writing
+// anything, for a reason the user can fix, such as a validation error from the
+// host's own handler. A server proposal whose execution returns it goes back
+// to pending at a new revision with Message as its Failure, so the user can
+// edit the arguments and approve again. Anywhere else it is a plain tool
+// failure. Message is shown to the user and the model.
+type RefusedError struct {
+	Message string
+}
+
+// Error implements error.
+func (e RefusedError) Error() string { return e.Message }

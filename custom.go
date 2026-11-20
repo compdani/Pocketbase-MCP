@@ -3,6 +3,7 @@ package pocketbasemcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -431,6 +432,12 @@ func (s *Server) callCustom(ctx context.Context, p Principal, baseURL, channel s
 		// handler details (and anything they embed) never leak.
 		if msg, ok := UserMessage(res.err); ok {
 			outcome = AuditOutcome(res.err)
+			var ae AccessError
+			if errors.As(res.err, &ae) && ae.Kind == "refused" {
+				// The chat executor turns this into chat.RefusedError; MCP
+				// only reads msg.
+				return toolRefusal{}, msg, nil
+			}
 			return nil, msg, nil
 		}
 		s.cfg.Logger.Error("custom tool failed", "tool", t.Name, "requestId", requestIDStr, "error", res.err)
@@ -513,3 +520,55 @@ func (s *Server) emitAudit(channel string, p Principal, tool, effect, collection
 	}
 	s.cfg.AuditFunc(AuditEvent{Channel: channel, PrincipalID: p.ID, PrincipalCollection: p.CollectionName, Tool: tool, Effect: effect, Collection: collection, Action: action, Outcome: outcome, Duration: time.Since(start), RequestID: requestIDString(id), Payload: payload})
 }
+
+// maxToolWarnings and maxToolWarningRunes bound what a Warn hook may store.
+const (
+	maxToolWarnings     = 10
+	maxToolWarningRunes = 500
+)
+
+// runToolPrepare runs a tool's Prepare hook. The refusal is shown like
+// Validate's: a host's ToolError or AccessError message as-is, anything else
+// generic.
+func runToolPrepare(ctx context.Context, t *ToolSpec, p Principal, args map[string]any) (map[string]any, string) {
+	if t == nil || t.Prepare == nil {
+		return args, ""
+	}
+	out, err := t.Prepare(ctx, p, args)
+	if err != nil {
+		if msg, ok := UserMessage(err); ok && strings.TrimSpace(msg) != "" {
+			return nil, msg
+		}
+		return nil, "the arguments could not be prepared"
+	}
+	if out == nil {
+		out = map[string]any{}
+	}
+	return out, ""
+}
+
+// runToolWarn runs a tool's Warn hook and keeps its non-empty notes, bounded.
+func runToolWarn(ctx context.Context, t *ToolSpec, p Principal, args map[string]any) []string {
+	if t == nil || t.Warn == nil {
+		return nil
+	}
+	var out []string
+	for _, w := range t.Warn(ctx, p, args) {
+		w = strings.Join(strings.Fields(w), " ")
+		if w == "" {
+			continue
+		}
+		if r := []rune(w); len(r) > maxToolWarningRunes {
+			w = string(r[:maxToolWarningRunes]) + "…"
+		}
+		out = append(out, w)
+		if len(out) == maxToolWarnings {
+			break
+		}
+	}
+	return out
+}
+
+// toolRefusal marks a custom tool's Refused error in the result slot of
+// callTool, which MCP ignores when there is a user error.
+type toolRefusal struct{}

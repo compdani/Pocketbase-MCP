@@ -42,6 +42,7 @@ const (
 	providerFieldBaseURL       = "baseURL"
 	providerFieldOAuthURL      = "oauthBaseURL"
 	providerFieldWireAPI       = "wireAPI"
+	providerFieldMaxTokens     = "maxTokensField"
 	providerFieldModels        = "models"
 	providerFieldDefault       = "defaultModel"
 	providerFieldHeaders       = "headers" // deprecated plaintext field, read-only fallback
@@ -141,6 +142,7 @@ func (s *ProviderStore) specs() []chatCollectionSpec {
 					&core.TextField{Name: providerFieldBaseURL},
 					&core.TextField{Name: providerFieldOAuthURL},
 					&core.TextField{Name: providerFieldWireAPI},
+					&core.TextField{Name: providerFieldMaxTokens},
 					&core.JSONField{Name: providerFieldModels, MaxSize: 64 << 10},
 					&core.TextField{Name: providerFieldDefault},
 					&core.TextField{Name: providerFieldHeadersCipher, Max: 64 << 10},
@@ -156,7 +158,7 @@ func (s *ProviderStore) specs() []chatCollectionSpec {
 			},
 			// The cipher field was added after the first provider-store shape;
 			// an existing collection gains it in place.
-			addFields: []string{providerFieldHeadersCipher},
+			addFields: []string{providerFieldHeadersCipher, providerFieldMaxTokens},
 			indexes: []chatIndexSpec{
 				{name: "idx_" + s.providers + "_scope_slug", unique: true, columns: providerFieldNamespace + ", " + providerFieldMount + ", " + providerFieldSlug},
 			},
@@ -268,6 +270,7 @@ func (s *ProviderStore) SaveProvider(ctx context.Context, scope catalog.Scope, p
 		rec.Set(providerFieldBaseURL, p.BaseURL)
 		rec.Set(providerFieldOAuthURL, p.OAuthBaseURL)
 		rec.Set(providerFieldWireAPI, p.WireAPI)
+		rec.Set(providerFieldMaxTokens, p.MaxTokensField)
 		rec.Set(providerFieldDefault, p.DefaultModel)
 		s.setJSON(rec, providerFieldModels, p.Models)
 		// Header values can carry credentials, so they are encrypted as one
@@ -514,14 +517,15 @@ func (s *ProviderStore) checkScope(scope catalog.Scope) error {
 
 func (s *ProviderStore) providerFrom(rec *core.Record) (catalog.Provider, error) {
 	p := catalog.Provider{
-		ID:           rec.GetString(providerFieldSlug),
-		Label:        rec.GetString(providerFieldLabel),
-		Kind:         catalog.Kind(rec.GetString(providerFieldKind)),
-		Enabled:      rec.GetBool(providerFieldEnabled),
-		BaseURL:      rec.GetString(providerFieldBaseURL),
-		OAuthBaseURL: rec.GetString(providerFieldOAuthURL),
-		WireAPI:      rec.GetString(providerFieldWireAPI),
-		DefaultModel: rec.GetString(providerFieldDefault),
+		ID:             rec.GetString(providerFieldSlug),
+		Label:          rec.GetString(providerFieldLabel),
+		Kind:           catalog.Kind(rec.GetString(providerFieldKind)),
+		Enabled:        rec.GetBool(providerFieldEnabled),
+		BaseURL:        rec.GetString(providerFieldBaseURL),
+		OAuthBaseURL:   rec.GetString(providerFieldOAuthURL),
+		WireAPI:        rec.GetString(providerFieldWireAPI),
+		MaxTokensField: rec.GetString(providerFieldMaxTokens),
+		DefaultModel:   rec.GetString(providerFieldDefault),
 	}
 	if raw := chatRawJSON(rec, providerFieldModels); len(raw) > 0 {
 		_ = json.Unmarshal(raw, &p.Models)

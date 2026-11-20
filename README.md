@@ -30,9 +30,12 @@ used from a chat panel inside your own app.
 | `examples/chat/` | Plain JS, Vue and Svelte chat front ends. |
 | `verification/` | Milestone test reports. |
 
-Each adapter and example is its own Go module. Build them one at a time and
-never put both adapters in one `go.work`: they resolve the same PocketBase
-module path to different code.
+Each adapter and example is its own Go module. The repository's `go.work`
+joins them for development; a host depends on the released modules (for
+example `go get github.com/compdani/pocketbase-mcp/adapters/pocketbase@v0.1.6`).
+See [operations.md](docs/operations.md#releasing). The two adapters can share
+the workspace because stock PocketBase and the fork now have different module
+paths; if the fork moves to stock's path, they can't.
 
 ## Quick start (stock PocketBase)
 

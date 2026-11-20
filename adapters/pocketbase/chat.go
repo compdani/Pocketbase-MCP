@@ -53,8 +53,12 @@ type ChatConfig struct {
 	// ManageProviders provisions the private provider collections, loads the
 	// catalog from them, and mounts the superuser provider-admin routes.
 	ManageProviders bool
-	// ProviderStore overrides the adapter's provider store. It is responsible
-	// for its own collections when supplied.
+	// ProviderStore is the provider persistence. With ManageProviders it
+	// replaces the adapter's own collections. Without it, it is a host-owned
+	// catalog: the catalog loads from it, no admin routes are mounted, and the
+	// host calls ChatRouter().Reload after its settings change. A store that
+	// implements catalog.CodexTokenStore also supplies the ChatGPT plan tokens.
+	// A supplied store is responsible for its own persistence.
 	ProviderStore catalog.Store
 	// RunnerConfig supplies optional runner limits (steps, timeout, worker
 	// bounds, history, output tokens) and the per-turn Setup hook. Its Store, Provider, Model and System fields are
@@ -71,7 +75,8 @@ type ChatConfig struct {
 	// TitleModel turns on automatic conversation titles, made from each new
 	// conversation's first message: "auto" titles with the turn's own model,
 	// a choice id ("provider::model") or model id names a (quick, cheap) model,
-	// and "" or "off" leaves titles off. With ManageProviders, the title model
+	// "first-message" uses the first message itself with no model call, and
+	// "" or "off" leaves titles off. With ManageProviders, the title model
 	// an administrator sets (POST /providers/actions/title) wins. A
 	// RunnerConfig.Titles set by the host replaces all of this.
 	TitleModel string
@@ -128,12 +133,15 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 	}
 	opts.Prefix = prefix
 
-	catalogMode := cfg.ManageProviders || len(cfg.Providers) > 0
+	// A host's own provider store is a catalog too, without the admin routes:
+	// the host keeps its settings page and calls ChatRouter().Reload after a
+	// change.
+	catalogMode := cfg.ManageProviders || len(cfg.Providers) > 0 || cfg.ProviderStore != nil
 	if opts.Runner != nil && catalogMode {
 		return errors.New("pocketbase: a custom chat runner cannot be combined with a provider catalog")
 	}
 	if cfg.Provider != nil && catalogMode {
-		return errors.New("pocketbase: set either Provider or Providers/ManageProviders, not both")
+		return errors.New("pocketbase: set either Provider or a catalog (Providers, ManageProviders or ProviderStore), not both")
 	}
 	if opts.Runner == nil && !catalogMode && cfg.Provider == nil {
 		return errors.New("pocketbase: chat requires a provider, a provider catalog, or a custom runner")
@@ -200,7 +208,7 @@ func (s *Server) EnableChat(cfg ChatConfig) error {
 			}
 		}
 		built, err := catalog.NewRouter(context.Background(), catalog.RouterOptions{
-			TitleChoice:      cfg.TitleModel,
+			TitleChoice:      routerTitleChoice(cfg.TitleModel),
 			CompactionChoice: cfg.CompactionModel,
 			Scope:            scope,
 			Store:            providerStore,
@@ -433,12 +441,24 @@ func (s *Server) handleChat(e *core.RequestEvent) error {
 	return nil
 }
 
+// routerTitleChoice is the catalog's title setting: first-message titles need
+// no model, so the catalog sees "off" for them.
+func routerTitleChoice(choice string) string {
+	if strings.EqualFold(strings.TrimSpace(choice), chat.TitleChoiceFirstMessage) {
+		return chat.TitleChoiceOff
+	}
+	return choice
+}
+
 // chatTitles is the default title configuration. A catalog router decides
 // off, auto or a model itself (it reads the admin setting, then TitleModel);
 // the legacy single provider titles only when TitleModel asks, with the
 // turn's model or the named model on that provider.
 func chatTitles(cfg ChatConfig, catalogMode bool) *chat.TitleConfig {
 	choice := strings.TrimSpace(cfg.TitleModel)
+	if strings.EqualFold(choice, chat.TitleChoiceFirstMessage) {
+		return &chat.TitleConfig{FromMessage: true}
+	}
 	if catalogMode {
 		return &chat.TitleConfig{}
 	}
@@ -494,4 +514,14 @@ func chatCompaction(cfg ChatConfig, router *catalog.Router) *chat.CompactionConf
 			Model:    choice,
 		}, true
 	}}
+}
+
+// ChatRouter returns the provider catalog chat uses, or false when chat runs
+// on a single provider or a custom runner. A host with its own provider
+// settings (ChatConfig.ProviderStore) calls Reload on it after a change.
+func (s *Server) ChatRouter() (*catalog.Router, bool) {
+	if s.chat == nil || s.chat.router == nil {
+		return nil, false
+	}
+	return s.chat.router, true
 }

@@ -43,6 +43,8 @@ type convRecord struct {
 	// summary is the conversation's summary; nil when it has none. It goes
 	// with the conversation when that is deleted.
 	summary *Summary
+	// importSource is the SourceID the conversation was imported from.
+	importSource string
 }
 
 type uploadRecord struct {
@@ -82,6 +84,7 @@ var _ ProposalStore = (*MemStore)(nil)
 var _ ActiveTurnStore = (*MemStore)(nil)
 var _ RecentMessageStore = (*MemStore)(nil)
 var _ UploadStore = (*MemStore)(nil)
+var _ ImportStore = (*MemStore)(nil)
 
 // NewMemStore returns an empty store.
 func NewMemStore(opts MemStoreOptions) *MemStore {
@@ -822,6 +825,9 @@ func (s *MemStore) TransitionProposal(_ context.Context, owner OwnerKey, id stri
 	if u.Result != nil {
 		rec.Result = cloneRaw(u.Result)
 	}
+	if u.ClearFailure {
+		rec.Failure = ""
+	}
 	if u.Failure != "" {
 		rec.Failure = u.Failure
 	}
@@ -830,6 +836,9 @@ func (s *MemStore) TransitionProposal(_ context.Context, owner OwnerKey, id stri
 	}
 	if u.Hunks != nil {
 		rec.Hunks = cloneHunks(u.Hunks)
+	}
+	if u.ClearDecided {
+		rec.DecidedAt = nil
 	}
 	if u.Decided {
 		decided := ts
@@ -862,6 +871,9 @@ func (s *MemStore) ReviseProposal(_ context.Context, owner OwnerKey, id string, 
 	}
 	rec.Arguments = canonical
 	rec.ArgumentsHash = hash
+	// A refusal or warning described the old arguments.
+	rec.Failure = ""
+	rec.Warnings = nil
 	rec.Revision++
 	rec.UpdatedAt = now()
 	return cloneProposal(*rec), nil
@@ -1121,6 +1133,9 @@ func cloneProposal(p Proposal) Proposal {
 	p.Arguments = cloneRaw(p.Arguments)
 	p.Result = cloneRaw(p.Result)
 	p.Hunks = cloneHunks(p.Hunks)
+	if p.Warnings != nil {
+		p.Warnings = append([]string(nil), p.Warnings...)
+	}
 	if p.DecidedAt != nil {
 		at := *p.DecidedAt
 		p.DecidedAt = &at
@@ -1191,4 +1206,41 @@ func (s *MemStore) PutSummary(_ context.Context, owner OwnerKey, sum Summary, pr
 	stored := sum
 	rec.summary = &stored
 	return true, nil
+}
+
+// ImportConversation implements ImportStore.
+func (s *MemStore) ImportConversation(_ context.Context, owner OwnerKey, c ImportedConversation) (Conversation, bool, error) {
+	if err := owner.Validate(); err != nil {
+		return Conversation{}, false, err
+	}
+	if err := ValidateImport(&c, now()); err != nil {
+		return Conversation{}, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rec := range s.convs {
+		if rec.importSource == c.SourceID && rec.conversation.Owner.Equal(owner) {
+			return cloneConversation(rec.conversation), false, nil
+		}
+	}
+	title := c.Title
+	if title == "" {
+		title = ImportTitle(c)
+	}
+	conv := Conversation{
+		ID:        s.newUniqueID(func(id string) bool { _, ok := s.convs[id]; return ok }),
+		Owner:     owner,
+		Title:     title,
+		Target:    c.Target,
+		CreatedAt: c.CreatedAt,
+		UpdatedAt: c.UpdatedAt,
+	}
+	rec := &convRecord{conversation: cloneConversation(conv), importSource: c.SourceID}
+	s.convs[conv.ID] = rec
+	for _, m := range c.Messages {
+		m.ID = s.newUniqueID(func(id string) bool { return s.messageIDTaken(id) })
+		m.ConversationID = conv.ID
+		rec.messages = append(rec.messages, cloneMessage(m))
+	}
+	return cloneConversation(conv), true, nil
 }

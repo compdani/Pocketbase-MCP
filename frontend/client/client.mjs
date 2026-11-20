@@ -305,6 +305,18 @@ export class ChatClient {
     return this._json('POST', `/conversations/${encodeSegment(id)}/compact`, { signal });
   }
 
+  /**
+   * POST /conversations/actions/import: bring a thread this browser kept into
+   * the server's history (plain user and assistant text). A repeated
+   * `sourceId` returns the earlier import with `created: false`.
+   */
+  async importConversation({ sourceId, title, createdAt, messages, signal } = {}) {
+    const body = { sourceId, messages };
+    if (title !== undefined) body.title = title;
+    if (createdAt !== undefined) body.createdAt = createdAt;
+    return this._json('POST', '/conversations/actions/import', { body, signal });
+  }
+
   /** DELETE /conversations/{id} */
   async deleteConversation(id, { signal } = {}) {
     return this._json('DELETE', `/conversations/${encodeSegment(id)}`, { signal });

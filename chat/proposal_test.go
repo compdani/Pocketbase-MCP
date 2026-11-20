@@ -61,6 +61,8 @@ func TestCanTransitionProposal(t *testing.T) {
 				ProposalStateSucceeded: true,
 				ProposalStateFailed:    true,
 				ProposalStateUnknown:   true,
+				// RefusedError: refused before writing, pending again.
+				ProposalStatePending: true,
 			},
 		},
 		ProposalLocationEditor: {

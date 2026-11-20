@@ -178,6 +178,8 @@ export interface ChatProposal {
   decidedAt?: string | null;
   result?: unknown;
   failure?: string;
+  /** The host's notes about the change (ToolSpec.Warn); never blocking. */
+  warnings?: string[];
   editorRevision?: string;
   hunks?: ChatHunkOutcome[];
 }
@@ -390,6 +392,14 @@ export declare class ChatClient {
   deleteConversation(id: string, options?: RequestOptions): Promise<null>;
 
   getContext(id: string, options?: RequestOptions): Promise<ChatContextStatus>;
+
+  /** Import a browser-kept thread (server option `Imports`). */
+  importConversation(thread: {
+    sourceId: string;
+    title?: string;
+    createdAt?: string;
+    messages: Array<{ role: 'user' | 'assistant'; text: string; createdAt?: string }>;
+  } & RequestOptions): Promise<{ conversation: ChatConversation; created: boolean }>;
 
   compactConversation(id: string, options?: RequestOptions): Promise<ChatCompactResult>;
 

@@ -53,6 +53,7 @@ type ProposalStore interface {
 	// arguments are canonicalized and hashed exactly as CreateProposal does;
 	// an argsHash that does not match returns ErrConflict. A successful
 	// revision increments Revision.
+	// It clears Failure and Warnings, which described the old arguments.
 	ReviseProposal(ctx context.Context, owner OwnerKey, id string, revision int, args json.RawMessage, argsHash string) (Proposal, error)
 
 	// ExpireProposals moves every pending proposal and every approved editor

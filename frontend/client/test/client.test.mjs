@@ -550,3 +550,13 @@ test('getContext and compactConversation address the conversation', async () => 
   assert.equal(fetch.calls[1].method, 'POST');
   assert.match(fetch.calls[1].url, /\/conversations\/c%2F1\/compact$/);
 });
+
+test('importConversation posts the thread', async () => {
+  const fetch = fakeFetch(() => jsonResponse({ conversation, created: true }));
+  const client = new ChatClient({ baseUrl: '', getToken: () => 't', fetch });
+  const out = await client.importConversation({ sourceId: 'local:1', messages: [{ role: 'user', text: 'hi' }] });
+  assert.equal(out.created, true);
+  assert.equal(fetch.calls[0].method, 'POST');
+  assert.match(fetch.calls[0].url, /\/conversations\/actions\/import$/);
+  assert.deepEqual(JSON.parse(fetch.calls[0].body), { sourceId: 'local:1', messages: [{ role: 'user', text: 'hi' }] });
+});

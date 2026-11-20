@@ -111,6 +111,21 @@ type ChatOptions struct {
 	// MaxContextBytes bounds one turn's context. Zero means the chat default
 	// (16 KiB).
 	MaxContextBytes int
+	// StoreContext keeps each turn's context with its user message (a
+	// "context" part the transcript returns), and hands the conversation's
+	// earlier contexts to the Setup hook (TurnInput.EarlierContexts). Use it
+	// for references a conversation accumulates. It needs TurnContext.
+	StoreContext bool
+	// Imports serves POST /conversations/actions/import for threads a browser kept
+	// (plain user and assistant text). Server-side imports use
+	// chat.ImportConversation with the store directly.
+	Imports bool
+	// MaxImportBytes bounds one import request. Zero means 8 MiB.
+	MaxImportBytes int64
+	// AcceptOtherImages also stores BMP, TIFF, ICO, HEIC and AVIF images
+	// (chat.OtherImageTypes). They reach a model only when its provider can
+	// take them; otherwise it is told the file was omitted.
+	AcceptOtherImages bool
 }
 
 // ChatHandler builds the chat HTTP handler. It authenticates a bearer token the
@@ -158,6 +173,10 @@ func (s *Server) ChatHandler(opts ChatOptions) (http.Handler, error) {
 		MaxUploadsPerConversation: opts.MaxUploadsPerConversation,
 		TurnContext:               opts.TurnContext,
 		MaxContextBytes:           opts.MaxContextBytes,
+		StoreContext:              opts.StoreContext,
+		Imports:                   opts.Imports,
+		MaxImportBytes:            opts.MaxImportBytes,
+		AcceptOtherImages:         opts.AcceptOtherImages,
 	})
 }
 
@@ -367,9 +386,20 @@ func (s *Server) chatCallerWithWrites(p Principal, r *http.Request, namespace, p
 			AuthCollectionID: p.CollectionID,
 			UserID:           p.ID,
 		},
-		Tools:   &chatToolExecutor{s: s, base: p, token: token, baseURL: s.baseURL(r), policy: policy, writes: writes, autoApprove: autoApprove},
-		Expires: tokenExpiry(token),
+		Tools:    &chatToolExecutor{s: s, base: p, token: token, baseURL: s.baseURL(r), policy: policy, writes: writes, autoApprove: autoApprove},
+		Expires:  tokenExpiry(token),
+		Identity: p,
 	}
+}
+
+// TurnPrincipal returns the caller of a chat turn, for a RunnerConfig.Setup
+// hook: the principal the chat authenticator put in TurnInput.Identity. ok is
+// false for a turn from another authenticator. The principal carries the
+// caller's token; never store or log it. The adapters' ResolveTurnCaller goes
+// one step further and returns the signed-in user, checked again.
+func TurnPrincipal(in chat.TurnInput) (Principal, bool) {
+	p, ok := in.Identity.(Principal)
+	return p, ok && p.ID != ""
 }
 
 // tokenExpiry reads the exp claim of an already verified JWT. It only decodes
@@ -540,14 +570,38 @@ func (e *chatToolExecutor) resolveWrite(ctx context.Context, name string, args j
 // write returns a validated draft, unless the host auto-approves that tool.
 func (e *chatToolExecutor) Plan(ctx context.Context, name string, args json.RawMessage) (*chat.ProposalDraft, error) {
 	ctx = withToolListingCache(ctx)
-	if _, isWrite := e.s.chatWriteTool(name); !isWrite {
+	desc, isWrite := e.s.chatWriteTool(name)
+	if !isWrite {
 		return nil, nil
+	}
+	autoApproved := desc.custom != nil && desc.custom.approvalAuto() && e.autoApprove
+	if desc.custom != nil && desc.custom.Prepare != nil && !autoApproved {
+		// The proposal stores what Prepare returns, so that is what gets
+		// validated, reviewed and approved.
+		p, ok := e.current()
+		if !ok {
+			return nil, chat.ToolError{Message: chatSessionExpiredMessage}
+		}
+		if !e.s.toolListedWithWrites(ctx, p, "chat", name, e.writes) {
+			return nil, chat.ToolError{Message: "Tool is unavailable."}
+		}
+		in, err := chatToolArgs(args)
+		if err != nil {
+			return nil, err
+		}
+		prepared, msg := runToolPrepare(ctx, desc.custom, p, in)
+		if msg != "" {
+			return nil, chat.ToolError{Message: "Invalid params: " + msg}
+		}
+		if args, err = json.Marshal(prepared); err != nil {
+			return nil, chat.ToolError{Message: "Invalid tool arguments."}
+		}
 	}
 	call, err := e.resolveWrite(ctx, name, args)
 	if err != nil {
 		return nil, err
 	}
-	if call.desc.custom != nil && call.desc.custom.approvalAuto() && e.autoApprove {
+	if autoApproved {
 		// The host chose review-free execution for this tool, and every other
 		// gate still applies when Call runs it.
 		return nil, nil
@@ -570,6 +624,7 @@ func (e *chatToolExecutor) Plan(ctx context.Context, name string, args json.RawM
 			Target:           call.editorID,
 			Arguments:        call.canonicalArgs(),
 			Summary:          call.desc.chatEditSummary(call.editorID, call.args),
+			Warnings:         runToolWarn(ctx, call.desc.custom, call.principal, call.args),
 			OnStored:         audit("", ""),
 		}, nil
 	}
@@ -581,6 +636,7 @@ func (e *chatToolExecutor) Plan(ctx context.Context, name string, args json.RawM
 		Target:           call.desc.chatWriteTarget(call.args, call.collection),
 		Arguments:        call.canonicalArgs(),
 		Summary:          call.desc.chatWriteSummary(call.args, call.collection),
+		Warnings:         runToolWarn(ctx, call.desc.custom, call.principal, call.args),
 		OnStored:         audit(call.collection, call.desc.action),
 	}, nil
 }
@@ -701,6 +757,9 @@ func (e *chatToolExecutor) run(ctx context.Context, call writeCall, approved boo
 		// applied, so it can never be recorded as a plain failure.
 		if ctx.Err() != nil || userErr == customToolTimeoutMessage {
 			return nil, fmt.Errorf("%s: %w", userErr, chat.ErrOutcomeUnknown)
+		}
+		if _, refused := result.(toolRefusal); refused && approved {
+			return nil, chat.RefusedError{Message: userErr}
 		}
 		return nil, chat.ToolError{Message: userErr}
 	}

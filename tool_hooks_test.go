@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/compdani/pocketbase-mcp/chat"
+	"github.com/compdani/pocketbase-mcp/chat/provider"
 )
 
 // blockPatchSchema is a host-defined structured editor patch: block
@@ -127,5 +128,91 @@ func TestCustomSummaryIsBounded(t *testing.T) {
 	got := customSummary(spec, nil)
 	if strings.ContainsAny(got, "\n\t") || len([]rune(got)) != maxCustomSummaryRunes || !strings.HasPrefix(got, "line one line two x") {
 		t.Fatalf("summary = %q (%d runes)", got, len([]rune(got)))
+	}
+}
+
+func TestToolPrepareAndWarnShapeTheProposal(t *testing.T) {
+	f := newProposalsFixture(t)
+	snapshot := map[string]any{"index.js": "v1"}
+	f.srv.cfg.CustomTools = append(f.srv.cfg.CustomTools, ToolSpec{
+		Name: "propose_plugin", Title: "Install plugin", Channels: "chat", Write: true,
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"draft": map[string]any{"type": "string"}, "files": map[string]any{"type": "object"}},
+			"required":   []string{"draft", "files"},
+		},
+		// The reviewer approves the draft's files as they are now.
+		Prepare: func(_ context.Context, _ Principal, args map[string]any) (map[string]any, error) {
+			if args["draft"] == "missing" {
+				return nil, Invalid("draft missing does not exist")
+			}
+			out := map[string]any{"draft": args["draft"], "files": map[string]any{}}
+			for k, v := range snapshot {
+				out["files"].(map[string]any)[k] = v
+			}
+			return out, nil
+		},
+		Warn: func(_ context.Context, _ Principal, args map[string]any) []string {
+			return []string{"  the plugin has no tests  ", "", strings.Repeat("w", 900)}
+		},
+		Handler: (&toolCounter{}).handler,
+	})
+	plan := f.exec(t, false).(planner)
+	ctx := context.Background()
+
+	draft, err := plan.Plan(ctx, "propose_plugin", json.RawMessage(`{"draft":"d1"}`))
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	// The required "files" was added by Prepare, before validation.
+	var args map[string]any
+	if err := json.Unmarshal(draft.Arguments, &args); err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := args["files"].(map[string]any); files["index.js"] != "v1" {
+		t.Fatalf("stored arguments = %s, want the snapshot", draft.Arguments)
+	}
+	snapshot["index.js"] = "v2" // a later change to the draft doesn't touch the proposal
+	if !strings.Contains(string(draft.Arguments), `"v1"`) {
+		t.Fatal("the proposal changed with the draft")
+	}
+	if len(draft.Warnings) != 2 || draft.Warnings[0] != "the plugin has no tests" || len([]rune(draft.Warnings[1])) != maxToolWarningRunes+1 {
+		t.Fatalf("warnings = %q", draft.Warnings)
+	}
+
+	_, err = plan.Plan(ctx, "propose_plugin", json.RawMessage(`{"draft":"missing"}`))
+	var te chat.ToolError
+	if !errors.As(err, &te) || !strings.Contains(te.Message, "draft missing does not exist") {
+		t.Fatalf("Prepare refusal = %v", err)
+	}
+}
+
+// A host handler's Refused becomes chat.RefusedError on an approved proposal
+// (the proposal goes back to pending), and stays a plain error on MCP.
+func TestRefusedHandlerOnApproval(t *testing.T) {
+	call := provider.ToolCall{ID: "call-1", Name: "send_campaign", Arguments: json.RawMessage(`{}`)}
+	f := newProposalsFixture(t, proposalCallStep(call), textStep("waiting"))
+	f.srv.cfg.CustomTools = append(f.srv.cfg.CustomTools, ToolSpec{
+		Name: "send_campaign", Channels: "both", Write: true, InputSchema: map[string]any{"type": "object"},
+		Handler: func(context.Context, CallContext, map[string]any) (any, error) {
+			return nil, Refused("The subject line is required.")
+		},
+	})
+	_, p := f.proposeTurn(t, call)
+	_, err := f.exec(t, false).(chat.ProposalExecutor).Execute(context.Background(), p)
+	var refused chat.RefusedError
+	if !errors.As(err, &refused) || refused.Message != "The subject line is required." {
+		t.Fatalf("Execute = %v, want chat.RefusedError", err)
+	}
+	// MCP sees the same message as a tool error.
+	var spec ToolSpec
+	for _, s := range f.srv.cfg.CustomTools {
+		if s.Name == "send_campaign" {
+			spec = s
+		}
+	}
+	_, userErr, rpcErr := f.srv.callCustom(context.Background(), chatPrincipal(f.host, "good"), "http://test", "mcp", spec, map[string]any{}, 1)
+	if rpcErr != nil || userErr != "The subject line is required." {
+		t.Fatalf("mcp = %q %v", userErr, rpcErr)
 	}
 }

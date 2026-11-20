@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/compdani/pocketbase-mcp/chat/provider"
@@ -246,8 +247,16 @@ func (r *Runner) retryOverflow(j *turnJob, step int, err error) bool {
 
 // providerFailure is the failure code of a provider error.
 func providerFailure(err error) string {
-	if provider.IsContextOverflow(err) {
+	switch {
+	case provider.IsContextOverflow(err):
 		return FailureContextTooLong
+	case errors.Is(err, errOutputLimit):
+		return FailureOutputLimit
+	case errors.Is(err, errContentFiltered):
+		return FailureContentFiltered
+	}
+	if code := provider.FailureKind(err); code != "" {
+		return code
 	}
 	return FailureProvider
 }

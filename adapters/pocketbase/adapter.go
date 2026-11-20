@@ -122,10 +122,14 @@ func New(app core.App, cfg pbmcp.Config) (*Server, error) {
 // When the host enabled chat with EnableChat before this call, the chat handler
 // is mounted as well, under its own prefix.
 func (s *Server) RegisterRoutes(r *router.Router[*core.RequestEvent]) error {
+	s.Adapter.setRouter(r)
+	if s.Config().DisableMCPEndpoint {
+		// Chat only: no MCP endpoint and no OAuth for it.
+		return s.registerChatRoutes(r)
+	}
 	if err := s.Adapter.registerOAuthRoutes(r); err != nil {
 		return err
 	}
-	s.Adapter.setRouter(r)
 	for _, p := range s.Paths() {
 		for _, path := range []string{p, p + "/"} {
 			r.POST(path, s.handle)

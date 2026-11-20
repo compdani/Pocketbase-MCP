@@ -927,3 +927,61 @@ func TestChatStoreProposalRecoveryScopedToNamespaceAndMount(t *testing.T) {
 		})
 	}
 }
+
+// On PostgreSQL a message may be much larger than MySQL's 64 KiB TEXT, up to
+// 4 MiB as on stock PocketBase, including on a store provisioned with the old
+// 1 MiB field maximum; past that, the store refuses before the database.
+func TestChatStorePostgresMessageLimit(t *testing.T) {
+	app := newChatForkApp(t)
+	prefix := chatTestPrefix(t)
+	opts := ChatStoreOptions{Prefix: prefix, Namespace: "ns", Mount: "/mcp"}
+	store, err := NewChatStore(app, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an install from before the raise.
+	col, err := app.FindCollectionByNameOrId(store.messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	col.Fields.GetByName(chatFieldParts).(*core.TextField).Max = 1 << 20
+	if err := app.Save(col); err != nil {
+		t.Fatal(err)
+	}
+	if store, err = NewChatStore(app, opts); err != nil {
+		t.Fatalf("re-provisioning an older store: %v", err)
+	}
+	col, err = app.FindCollectionByNameOrId(store.messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := col.Fields.GetByName(chatFieldParts).(*core.TextField).Max; got != chatJSONFieldMaxChars {
+		t.Fatalf("parts field max after upgrade = %d, want %d", got, chatJSONFieldMaxChars)
+	}
+	if got := chatJSONMax(); got != chatMaxJSONBytesPostgres {
+		t.Fatalf("limit on PostgreSQL = %d, want %d", got, chatMaxJSONBytesPostgres)
+	}
+
+	owner := chat.OwnerKey{Namespace: "ns", Mount: "/mcp", AuthCollectionID: "users", UserID: "u1"}
+	conv, err := store.CreateConversation(context.Background(), chat.Conversation{Owner: owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("a long tool result ", 2<<20/19)
+	if _, err := store.AppendMessage(context.Background(), owner, chat.Message{
+		ConversationID: conv.ID, Role: chat.RoleUser, Parts: []chat.Part{{Type: chat.PartText, Text: long}},
+	}); err != nil {
+		t.Fatalf("a 2 MiB message was refused on PostgreSQL: %v", err)
+	}
+	msgs, _, err := store.ListMessages(context.Background(), owner, conv.ID, chat.Page{})
+	if err != nil || len(msgs) != 1 || msgs[0].Parts[0].Text != long {
+		t.Fatalf("the 2 MiB message did not round-trip: %d messages, err %v", len(msgs), err)
+	}
+	huge := strings.Repeat("x", chatMaxJSONBytesPostgres)
+	_, err = store.AppendMessage(context.Background(), owner, chat.Message{
+		ConversationID: conv.ID, Role: chat.RoleUser, Parts: []chat.Part{{Type: chat.PartText, Text: huge}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "over this database's limit") {
+		t.Fatalf("an over-limit message: err = %v", err)
+	}
+}

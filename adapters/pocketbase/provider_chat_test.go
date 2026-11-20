@@ -1,6 +1,7 @@
 package pocketbase
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -81,5 +82,63 @@ func TestChatManagedProvidersEndToEnd(t *testing.T) {
 	}
 	if len(status.Choices) != 0 {
 		t.Fatalf("choices after delete = %+v", status.Choices)
+	}
+}
+
+// A host that keeps its own provider settings passes its store without
+// ManageProviders: the catalog loads from it, no admin routes exist, and the
+// host reloads the catalog after its settings change.
+func TestChatHostOwnedProviderStore(t *testing.T) {
+	var store catalog.Store
+	var srvRef *Server
+	env := newChatEnv(t, chatEnvOptions{
+		enable: func(srv *Server) error {
+			srvRef = srv
+			built, err := NewProviderStore(srv.Adapter.app, ProviderStoreOptions{Prefix: "_hostProviders", Scope: catalog.Scope{Namespace: "chat-tests", Mount: "/mcp"}})
+			if err != nil {
+				return err
+			}
+			if err := built.SaveProvider(context.Background(), catalog.Scope{Namespace: "chat-tests", Mount: "/mcp"}, catalog.Provider{
+				ID: "api", Label: "API", Kind: catalog.KindOpenAI, Enabled: true, BaseURL: "https://example.invalid/v1",
+				Models: []catalog.Model{{ID: "m1"}}, DefaultModel: "m1",
+			}); err != nil {
+				return err
+			}
+			store = built
+			return srv.EnableChat(ChatConfig{
+				Options:       pbmcp.ChatOptions{Namespace: "chat-tests", Prefix: chatTestPrefix},
+				ProviderStore: built,
+			})
+		},
+	})
+	var status struct {
+		Choices []chat.ModelChoice `json:"choices"`
+	}
+	if code := env.json(env.userToken, http.MethodGet, chatTestPrefix+"/status", "", &status); code != http.StatusOK || len(status.Choices) != 1 {
+		t.Fatalf("status: HTTP %d %+v", code, status.Choices)
+	}
+	if code := env.json(env.userToken, http.MethodGet, chatTestPrefix+"/providers", "", nil); code != http.StatusNotFound {
+		t.Fatalf("admin routes: HTTP %d, want 404", code)
+	}
+	// The host's settings page adds a model, then reloads the catalog.
+	scope := catalog.Scope{Namespace: "chat-tests", Mount: "/mcp"}
+	p, err := store.GetProvider(context.Background(), scope, "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Models = append(p.Models, catalog.Model{ID: "m2"})
+	if err := store.SaveProvider(context.Background(), scope, p); err != nil {
+		t.Fatal(err)
+	}
+	router, ok := srvRef.ChatRouter()
+	if !ok {
+		t.Fatal("no router")
+	}
+	if err := router.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status.Choices = nil
+	if code := env.json(env.userToken, http.MethodGet, chatTestPrefix+"/status", "", &status); code != http.StatusOK || len(status.Choices) != 2 {
+		t.Fatalf("after reload: HTTP %d %+v", code, status.Choices)
 	}
 }

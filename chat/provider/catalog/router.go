@@ -161,7 +161,10 @@ func (r *Router) Reload(ctx context.Context) error {
 	if needsCodex && r.opts.Store == nil {
 		return errors.New("catalog: codex providers require a credential store")
 	}
-	if hasCodex && r.opts.Store != nil {
+	_, hostOwnsCodex := r.opts.Store.(CodexTokenStore)
+	if hasCodex && r.opts.Store != nil && !hostOwnsCodex {
+		// Only the router's own sign-in uses the host id; a host-owned plan
+		// sign-in never needs it.
 		hostID, err = r.opts.Store.HostID(ctx, r.opts.Scope)
 		if err != nil {
 			return fmt.Errorf("catalog: host id: %w", err)
@@ -194,7 +197,8 @@ func (r *Router) Reload(ctx context.Context) error {
 	for _, p := range providers {
 		p = p.Normalized()
 		var manager *codex.Manager
-		if p.Kind == KindCodex && r.opts.Store != nil {
+		hostTokens, hostOwned := r.opts.Store.(CodexTokenStore)
+		if p.Kind == KindCodex && r.opts.Store != nil && !hostOwned {
 			// A codex manager exists even while the provider is disabled, so
 			// an administrator can sign in before enabling it.
 			manager = r.managerFor(p, hostID)
@@ -211,7 +215,12 @@ func (r *Router) Reload(ctx context.Context) error {
 			errs[p.ID] = err.Error()
 			continue
 		}
-		if p.Kind == KindCodex {
+		if p.Kind == KindCodex && hostOwned {
+			if !hostTokens.CodexSignedIn(ctx, r.opts.Scope, p.ID) {
+				errs[p.ID] = "Not signed in with a ChatGPT plan."
+				continue
+			}
+		} else if p.Kind == KindCodex {
 			if manager == nil {
 				errs[p.ID] = "Codex requires a credential store."
 				continue
@@ -222,7 +231,13 @@ func (r *Router) Reload(ctx context.Context) error {
 				continue
 			}
 		}
-		impl, err := r.build(ctx, p, manager)
+		var impl provider.Provider
+		var err error
+		if p.Kind == KindCodex && hostOwned {
+			impl, err = r.buildCodex(p, hostCodexToken{store: hostTokens, scope: r.opts.Scope, id: p.ID})
+		} else {
+			impl, err = r.build(ctx, p, manager)
+		}
 		if err != nil {
 			errs[p.ID] = err.Error()
 			continue
@@ -312,14 +327,15 @@ func (r *Router) build(_ context.Context, p Provider, manager *codex.Manager) (p
 	switch p.Kind {
 	case KindOpenAI:
 		return openai.New(openai.Config{
-			BaseURL:     p.BaseURL,
-			APIKey:      p.APIKey,
-			HTTPClient:  r.client,
-			Headers:     p.Headers,
-			Name:        p.ID,
-			WireAPI:     p.WireAPI,
-			ExtraBody:   p.ExtraBody,
-			TokenSource: nil,
+			BaseURL:        p.BaseURL,
+			APIKey:         p.APIKey,
+			HTTPClient:     r.client,
+			Headers:        p.Headers,
+			Name:           p.ID,
+			WireAPI:        p.WireAPI,
+			ExtraBody:      p.ExtraBody,
+			MaxTokensField: p.MaxTokensField,
+			TokenSource:    nil,
 		})
 	case KindAnthropic:
 		return anthropic.New(anthropic.Config{
@@ -333,17 +349,23 @@ func (r *Router) build(_ context.Context, p Provider, manager *codex.Manager) (p
 		if manager == nil {
 			return nil, errors.New("codex provider has no credential manager")
 		}
-		return openai.New(openai.Config{
-			BaseURL:     p.BaseURL,
-			HTTPClient:  r.client,
-			Headers:     p.Headers,
-			Name:        p.ID,
-			WireAPI:     openai.WireResponses,
-			ExtraBody:   p.ExtraBody,
-			TokenSource: manager,
-		})
+		return r.buildCodex(p, manager)
 	}
 	return nil, fmt.Errorf("unsupported provider kind %q", p.Kind)
+}
+
+// buildCodex builds the plan route over a token source: the router's own
+// sign-in manager, or the host's (CodexTokenStore).
+func (r *Router) buildCodex(p Provider, tokens openai.TokenSource) (provider.Provider, error) {
+	return openai.New(openai.Config{
+		BaseURL:     p.BaseURL,
+		HTTPClient:  r.client,
+		Headers:     p.Headers,
+		Name:        p.ID,
+		WireAPI:     openai.WireResponses,
+		ExtraBody:   p.ExtraBody,
+		TokenSource: tokens,
+	})
 }
 
 // BuildTest builds one provider for an admin test. It is not part of the live

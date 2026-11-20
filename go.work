@@ -1,0 +1,13 @@
+// Local development workspace: the root module and its submodules resolve to
+// this checkout. Releases don't use it (see docs/operations.md, "Releasing"):
+// each submodule requires the tagged version of the modules it imports.
+go 1.27.0
+
+use (
+	.
+	./adapters/pbpostgress
+	./adapters/pocketbase
+	./auth/stockoauth
+	./examples/fork
+	./examples/stock
+)
