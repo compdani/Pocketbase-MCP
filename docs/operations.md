@@ -5,15 +5,15 @@ Deploying and running the module. How it works is in
 
 ## Pinned versions
 
-Updated 2026-11-19.
+Updated 2026-11-20.
 
 | Item | Pin |
 |---|---|
 | Root module | `github.com/compdani/pocketbase-mcp`, standard library only, `go 1.26` |
 | Stock PocketBase | `ganigeorgiev.com/pocketbase/pocketbase v0.41.1` and `ganigeorgiev.com/pocketbase/dbx v1.13.0`. PocketBase moved to this host at v0.41; v0.40.1 and earlier were `github.com/pocketbase/pocketbase`. |
-| Fork | `github.com/compdani/pb-postgress` `master` at `c047535c` (merge of PR #4, `oauth-mcp-clients`), tagged and pinned as `v0.41.6` |
+| Fork | `github.com/compdani/pb-postgress` `master` at `9d70530d` (merge of PR #6, `remove-mysql`), tagged and pinned as `v0.41.7`. PostgreSQL only from this tag on. |
 | Go toolchain | `go1.26.5`. Modules that depend on PocketBase (adapters, `auth/stockoauth`, examples) declare `go 1.27` and switch to `go1.27.0` automatically. |
-| Databases tested | SQLite (stock), PostgreSQL 14 (fork). **MySQL is untested.** |
+| Databases tested | SQLite (stock), PostgreSQL 14 (fork). The fork no longer supports MySQL. |
 
 Each adapter and example picks its PocketBase with its own `go.mod` (the fork
 through a `replace`). The repository's `go.work` includes both adapters and
@@ -147,11 +147,17 @@ The root module and the submodules (`auth/stockoauth`, `adapters/pocketbase`,
 4. After pushing, `GOWORK=off go mod tidy` in each submodule records the
    root's checksum in its `go.sum` (a follow-up commit).
 
-**Message size on the fork.** On PostgreSQL a chat message (and any other
-stored JSON payload) may now be up to 4 MiB, as on stock PocketBase; it was
-60 KiB, a limit only MySQL needs. The fork store raises the field maximum of
-an existing install in place on startup; the column type doesn't change.
-MySQL keeps 60 KiB.
+**Message size on the fork.** A chat message (and any other stored JSON
+payload) may be up to 4 MiB, as on stock PocketBase. The fork store raises the
+field maximum of an existing install in place on startup; the column type
+doesn't change.
+
+**Fork v0.41.7 drops MySQL.** pb-postgress v0.41.7 runs on PostgreSQL only;
+the fork store no longer carries the 60 KiB MySQL payload limit or the MySQL
+error matching. The chat collections keep their schema (plain `UNIQUE`
+indexes over derived slot columns, bounded text fields), so an existing
+PostgreSQL install upgrades in place with no migration. A fork app on MySQL
+must move to PostgreSQL before taking this version.
 
 **Upgrading to v0.1.6.** Passing `ChatConfig.ProviderStore` now turns on the
 provider catalog by itself (a host-owned catalog, without the admin routes).
@@ -161,7 +167,7 @@ where it used to be ignored, now fails at startup: drop one of the two.
 A host then needs only `go get
 github.com/compdani/pocketbase-mcp/adapters/pocketbase@v0.1.6`. A host on the
 fork also needs the adapter's `replace github.com/pocketbase/pocketbase =>
-github.com/compdani/pb-postgress v0.41.6` in its own `go.mod`, because that
+github.com/compdani/pb-postgress v0.41.7` in its own `go.mod`, because that
 replace is not inherited either.
 
 ## Migrating from customjs

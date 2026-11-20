@@ -11,6 +11,7 @@ import {
   conversationsFromState,
   effortOptionFromState,
   entriesFromState,
+  errorCode,
   errorText,
   hasConversationList,
   isPageElement,
@@ -715,7 +716,9 @@ test('modelsFromState keeps only model id strings', () => {
 // --- proposals -------------------------------------------------------------
 
 test('a pending proposal maps to an entry with plain words and buttons', () => {
-  const entry = proposalEntryOf(proposalOf({ revision: 3, summary: 'Create an item' }));
+  const source = proposalOf({ revision: 3, summary: 'Create an item' });
+  const entry = proposalEntryOf(source);
+  const { error: _error, ...data } = source;
   assert.deepEqual(entry, {
     id: 'proposal:p1',
     type: 'proposal',
@@ -730,6 +733,7 @@ test('a pending proposal maps to an entry with plain words and buttons', () => {
     detail: '',
     warnings: [],
     canDecide: true,
+    proposal: data,
   });
   const warned = proposalEntryOf(proposalOf({ warnings: [' The workflow has no trigger ', '', 7] }));
   assert.deepEqual(warned.warnings, ['The workflow has no trigger']);
@@ -1130,3 +1134,231 @@ test('a refused approval reads as fixable', () => {
     'The subject line is required. Nothing was saved; the change is waiting for your decision again.',
   );
 });
+
+
+// --- send outcome, errors, context chips, whole proposals --------------------
+
+const tickAll = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test('every submit reports how it ended, on the element and to onSend', async () => {
+  const controller = makeController(stateOf());
+  const element = new FakeElement();
+  const results = [];
+  const events = [];
+  element.addEventListener('chat-send', (event) => events.push(event.detail));
+  bindAgentPanel(element, controller, { onSend: (result) => results.push(result) });
+
+  controller.send = async () => ({ turn: { id: 't1', state: 'queued' }, created: true });
+  element.fire('agent-submit', { text: 'one', attachments: [], references: [], model: '', options: {} });
+  await tickAll();
+
+  controller.send = async () => {
+    controller.set({ error: { code: 'turn_refused', message: 'Pick a list first.' } });
+    return null;
+  };
+  element.fire('agent-submit', { text: 'two', attachments: [], references: [], model: '', options: {} });
+  await tickAll();
+
+  controller.send = async () => {
+    controller.set({ error: { code: 'no_provider', message: "AI isn't set up yet." } });
+    return null;
+  };
+  element.fire('agent-submit', { text: 'three', attachments: [], references: [], model: '', options: {} });
+  await tickAll();
+  assert.match(element.error, /isn't set up/);
+
+  controller.set({ error: null });
+  controller.send = async () => null;
+  element.fire('agent-submit', { text: 'four', attachments: [], references: [], model: '', options: {} });
+  await tickAll();
+
+  assert.deepEqual(results.map((r) => r.status), ['accepted', 'refused', 'failed', 'cancelled']);
+  assert.deepEqual(events.map((r) => r.status), ['accepted', 'refused', 'failed', 'cancelled']);
+  assert.equal(results[2].code, 'no_provider');
+  assert.match(results[2].message, /isn't set up/);
+});
+
+test('a new submit hides the previous turn\'s failure', async () => {
+  const controller = makeController(stateOf({
+    turn: { turnId: 't-old', state: 'failed', error: { code: 'provider_error', message: 'x' } },
+  }));
+  const element = new FakeElement();
+  bindAgentPanel(element, controller);
+  assert.match(element.error, /provider refused/);
+  let errorDuringSend = null;
+  controller.send = async () => {
+    errorDuringSend = element.error;
+    return { turn: { id: 't-new', state: 'queued' }, created: true };
+  };
+  element.fire('agent-submit', { text: 'again', attachments: [], references: [], model: '', options: {} });
+  await tickAll();
+  assert.equal(errorDuringSend, '');
+  // A failure of the new turn shows again.
+  controller.set({ turn: { turnId: 't-new', state: 'failed', error: { code: 'max_steps', message: 'x' } } });
+  assert.match(element.error, /too many steps/);
+});
+
+test('the binding reads the page context before creating the conversation', async () => {
+  const controller = makeController(stateOf({ activeConversationId: null }));
+  const order = [];
+  controller.readContext = () => {
+    order.push('context');
+    return Promise.resolve({ route: '/here' });
+  };
+  const create = controller.newConversation;
+  controller.newConversation = async (title) => {
+    order.push('create');
+    const created = await create.call(controller, title);
+    controller.set({ activeConversationId: created.id });
+    return created;
+  };
+  const element = new FakeElement();
+  bindAgentPanel(element, controller);
+  element.fire('agent-submit', { text: 'hi', attachments: [], references: [], model: '', options: {} });
+  await tickAll();
+  assert.deepEqual(order, ['context', 'create']);
+  const send = controller.calls.find((c) => c.method === 'send');
+  assert.deepEqual(await send.options.context, { route: '/here' });
+});
+
+test('a host can replace every error line', async () => {
+  const controller = makeController(stateOf({ error: { code: 'no_provider', message: 'x' } }));
+  const element = new FakeElement();
+  const seen = [];
+  bindAgentPanel(element, controller, {
+    errorText(code, text) {
+      seen.push(code);
+      return code === 'no_provider' ? 'La IA no está configurada.' : `[es] ${text}`;
+    },
+  });
+  assert.equal(element.error, 'La IA no está configurada.');
+  controller.set({ error: null, features: { uploads: false } });
+  const file = new File(['a'], 'a.txt', { type: 'text/plain' });
+  element.fire('agent-submit', { text: 'hi', attachments: [{ id: 'a1', file }], references: [], model: '', options: {} });
+  assert.equal(element.error, `[es] ${ATTACHMENTS_UNSUPPORTED_TEXT}`);
+  assert.ok(seen.includes('attachments_unsupported'));
+  assert.equal(errorCode({ code: 'weird', message: 'fetch failed' }), 'network');
+  assert.equal(errorCode({ code: 'no_provider' }), 'no_provider');
+  assert.match(errorText({ code: 'no_provider' }), /isn't set up/);
+});
+
+test('stored page context becomes reference chips only through the option', () => {
+  const state = stateOf({
+    messages: [
+      message('m1', 'user', '', { parts: [
+        { type: 'text', text: 'what about this one?' },
+        { type: 'context', result: { listId: 'l1', listName: 'Groceries' } },
+      ] }),
+    ],
+  });
+  const plain = entriesFromState(state);
+  assert.equal(plain[0].references, undefined);
+  const chips = entriesFromState(state, {
+    contextReferences: (context) => [{ type: 'list', id: context.listId, label: context.listName }, { type: 'x' }],
+  });
+  assert.deepEqual(chips[0].references, [{ type: 'list', id: 'l1', label: 'Groceries' }]);
+  const throwing = entriesFromState(state, { contextReferences: () => { throw new Error('no'); } });
+  assert.equal(throwing[0].references, undefined);
+});
+
+test('a notice carries the decided proposal and its result', () => {
+  const decided = proposalOf({ id: 'p9', state: 'succeeded', result: { id: 'r1' } });
+  const state = stateOf({
+    decidedProposals: [decided],
+    messages: [
+      message('m1', 'notice', '', { parts: [
+        { type: 'proposal_outcome', proposalId: 'p9', state: 'succeeded', tool: 'create_items', text: 'Applied.', result: { id: 'r1' } },
+      ] }),
+    ],
+  });
+  const [notice] = entriesFromState(state);
+  assert.equal(notice.type, 'notice');
+  assert.deepEqual(notice.result, { id: 'r1' });
+  assert.equal(notice.proposal.id, 'p9');
+  assert.deepEqual(notice.proposal.result, { id: 'r1' });
+  assert.equal('error' in notice.proposal, false);
+});
+
+test('a superseded send leaves no echo and no chip error', async () => {
+  const controller = makeController(stateOf({ features: { proposals: false, uploads: true } }));
+  const element = new FakeElement();
+  const results = [];
+  bindAgentPanel(element, controller, { onSend: (r) => results.push(r.status) });
+  controller.send = async () => {
+    controller.set({ activeConversationId: null }); // an account switch
+    return null;
+  };
+  const file = new File(['a'], 'a.txt', { type: 'text/plain' });
+  element.fire('agent-submit', { text: 'secret note', attachments: [{ id: 'a1', file }], references: [], model: '', options: {} });
+  await tickAll();
+  await tickAll();
+  assert.deepEqual(results, ['cancelled']);
+  assert.equal(element.entries.some((e) => e.id === 'pending:user'), false);
+  assert.deepEqual(element.attachmentStates.at(-1), { id: 'a1', state: null });
+});
+
+test('a dismissed error does not come back when the next submit starts', async () => {
+  const controller = makeController(stateOf({ error: { code: 'no_provider', message: 'x' } }));
+  const element = new FakeElement();
+  bindAgentPanel(element, controller);
+  element.fire('agent-error-dismiss', {});
+  element.error = '';
+  let shown = null;
+  controller.send = async () => {
+    shown = element.error;
+    return { turn: { id: 't1', state: 'queued' }, created: true };
+  };
+  element.fire('agent-submit', { text: 'again', attachments: [], references: [], model: '', options: {} });
+  await tickAll();
+  assert.equal(shown, '');
+});
+
+test('the binding skips the context read when the server takes none', async () => {
+  const controller = makeController(stateOf({ features: { proposals: false, uploads: false, context: false } }));
+  let reads = 0;
+  controller.readContext = () => {
+    reads += 1;
+    return Promise.resolve({});
+  };
+  const element = new FakeElement();
+  bindAgentPanel(element, controller);
+  element.fire('agent-submit', { text: 'hi', attachments: [], references: [], model: '', options: {} });
+  await tickAll();
+  assert.equal(reads, 0);
+});
+
+test('errorText reaches proposal cards, and nothing is reported after unbind', async () => {
+  const controller = makeController(stateOf({
+    proposals: [proposalOf({ error: { code: 'stale', message: 'x' } })],
+  }));
+  const element = new FakeElement();
+  const results = [];
+  const binding = bindAgentPanel(element, controller, {
+    errorText: (code) => `[${code}]`,
+    onSend: (r) => results.push(r),
+  });
+  const card = element.entries.find((e) => e.type === 'proposal');
+  assert.equal(card.error, '[stale]');
+
+  controller.set({ features: { uploads: false } });
+  const file = new File(['a'], 'a.txt', { type: 'text/plain' });
+  element.fire('agent-submit', { text: 'hi', attachments: [{ id: 'a1', file }], references: [], model: '', options: {} });
+  assert.deepEqual(results.map((r) => [r.status, r.code]), [['failed', 'attachments_unsupported']]);
+
+  const gate = deferredOf();
+  controller.send = async () => gate.promise;
+  controller.set({ features: null });
+  element.fire('agent-submit', { text: 'late', attachments: [], references: [], model: '', options: {} });
+  binding.unbind();
+  gate.resolve({ turn: { id: 't1' }, created: true });
+  await tickAll();
+  assert.equal(results.length, 1);
+});
+
+function deferredOf() {
+  let resolve;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}

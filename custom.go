@@ -374,6 +374,9 @@ func (s *Server) customAllowedOnChannel(p Principal, t ToolSpec, channel string,
 // to recognize it: after dispatch, a timeout may still have applied.
 const customToolTimeoutMessage = "Tool execution timed out."
 
+// outcomeUnknownFallback is the message of an OutcomeUnknown("").
+const outcomeUnknownFallback = "The tool may or may not have applied this change; check before retrying."
+
 // callCustom runs one custom tool and returns its outcome without touching a
 // ResponseWriter. The writer (callTool's caller) keeps the MCP wire shape.
 func (s *Server) callCustom(ctx context.Context, p Principal, baseURL, channel string, t ToolSpec, args map[string]any, requestID any) (any, string, *protocol.Error) {
@@ -405,6 +408,9 @@ func (s *Server) callCustom(ctx context.Context, p Principal, baseURL, channel s
 	timeout := t.Timeout
 	if timeout == 0 {
 		timeout = s.cfg.MaxToolTimeout
+		if d, ok := ctx.Value(chatToolTimeoutKey{}).(time.Duration); ok && d > 0 && channel == "chat" {
+			timeout = d
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -433,10 +439,23 @@ func (s *Server) callCustom(ctx context.Context, p Principal, baseURL, channel s
 		if msg, ok := UserMessage(res.err); ok {
 			outcome = AuditOutcome(res.err)
 			var ae AccessError
+			if strings.TrimSpace(msg) == "" {
+				// An empty user-safe message must never read as success:
+				// callers treat an empty userErr as "no error".
+				msg = "Tool execution failed."
+				if errors.As(res.err, &ae) && ae.Kind == "unknown" {
+					msg = outcomeUnknownFallback
+				}
+			}
 			if errors.As(res.err, &ae) && ae.Kind == "refused" {
 				// The chat executor turns this into chat.RefusedError; MCP
 				// only reads msg.
 				return toolRefusal{}, msg, nil
+			}
+			if errors.As(res.err, &ae) && ae.Kind == "unknown" {
+				// The chat executor records an approved change as "outcome
+				// unknown"; MCP only reads msg.
+				return toolOutcomeUnknown{}, msg, nil
 			}
 			return nil, msg, nil
 		}
@@ -572,3 +591,6 @@ func runToolWarn(ctx context.Context, t *ToolSpec, p Principal, args map[string]
 // toolRefusal marks a custom tool's Refused error in the result slot of
 // callTool, which MCP ignores when there is a user error.
 type toolRefusal struct{}
+
+// toolOutcomeUnknown marks a custom tool's OutcomeUnknown error the same way.
+type toolOutcomeUnknown struct{}

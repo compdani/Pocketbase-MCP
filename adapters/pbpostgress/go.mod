@@ -19,7 +19,6 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
 	github.com/ganigeorgiev/fexpr v0.6.0 // indirect
-	github.com/go-sql-driver/mysql v1.9.3 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/webauthn v0.17.4 // indirect
 	github.com/go-webauthn/x v0.2.6 // indirect
@@ -55,4 +54,4 @@ require (
 	modernc.org/sqlite v1.52.0 // indirect
 )
 
-replace github.com/pocketbase/pocketbase => github.com/compdani/pb-postgress v0.41.6
+replace github.com/pocketbase/pocketbase => github.com/compdani/pb-postgress v0.41.7

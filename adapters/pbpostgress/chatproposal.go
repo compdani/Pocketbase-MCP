@@ -8,7 +8,7 @@ package pbpostgress
 //
 // Fork-specific behaviour (see the package comment of chatstore.go):
 //
-//   - PostgreSQL/MySQL transactions really run concurrently across app
+//   - PostgreSQL transactions really run concurrently across app
 //     instances, so TransitionProposal and ReviseProposal lock the proposal row
 //     (SELECT ... FOR UPDATE) and re-read it before comparing state and
 //     revision. The loser of a race waits for the winner and then sees its

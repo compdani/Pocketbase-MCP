@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/compdani/pocketbase-mcp/chat"
 	"github.com/compdani/pocketbase-mcp/chat/provider"
@@ -214,5 +217,126 @@ func TestRefusedHandlerOnApproval(t *testing.T) {
 	_, userErr, rpcErr := f.srv.callCustom(context.Background(), chatPrincipal(f.host, "good"), "http://test", "mcp", spec, map[string]any{}, 1)
 	if rpcErr != nil || userErr != "The subject line is required." {
 		t.Fatalf("mcp = %q %v", userErr, rpcErr)
+	}
+}
+
+// A host handler's OutcomeUnknown ends an approved proposal as "may or may
+// not have applied", with the handler's message; on MCP it is a plain error.
+func TestOutcomeUnknownHandlerOnApproval(t *testing.T) {
+	call := provider.ToolCall{ID: "call-1", Name: "send_campaign", Arguments: json.RawMessage(`{}`)}
+	f := newProposalsFixture(t, proposalCallStep(call), textStep("waiting"))
+	f.srv.cfg.CustomTools = append(f.srv.cfg.CustomTools, ToolSpec{
+		Name: "send_campaign", Channels: "both", Write: true, InputSchema: map[string]any{"type": "object"},
+		Handler: func(context.Context, CallContext, map[string]any) (any, error) {
+			return nil, OutcomeUnknown("The mail service did not confirm the send.")
+		},
+	})
+	_, p := f.proposeTurn(t, call)
+	_, err := f.exec(t, false).(chat.ProposalExecutor).Execute(context.Background(), p)
+	var unknown chat.OutcomeUnknownError
+	if !errors.Is(err, chat.ErrOutcomeUnknown) || !errors.As(err, &unknown) || unknown.Message != "The mail service did not confirm the send." {
+		t.Fatalf("Execute = %v, want chat.OutcomeUnknownError", err)
+	}
+	var te chat.ToolError
+	if errors.As(err, &te) {
+		t.Fatal("an unknown outcome was reported as a definite failure")
+	}
+	var spec ToolSpec
+	for _, s := range f.srv.cfg.CustomTools {
+		if s.Name == "send_campaign" {
+			spec = s
+		}
+	}
+	_, userErr, rpcErr := f.srv.callCustom(context.Background(), chatPrincipal(f.host, "good"), "http://test", "mcp", spec, map[string]any{}, 1)
+	if rpcErr != nil || userErr != "The mail service did not confirm the send." {
+		t.Fatalf("mcp = %q %v", userErr, rpcErr)
+	}
+}
+
+// ChatOptions.ToolTimeout bounds chat's custom tool calls on its own, and an
+// approval window longer than it is refused at startup.
+func TestChatToolTimeout(t *testing.T) {
+	f := newProposalsFixture(t)
+	f.srv.cfg.MaxToolTimeout = 30 * time.Millisecond
+	spec := ToolSpec{
+		Name: "slow_tool", Channels: "both", InputSchema: map[string]any{"type": "object"},
+		Handler: func(ctx context.Context, _ CallContext, _ map[string]any) (any, error) {
+			select {
+			case <-time.After(80 * time.Millisecond):
+				return map[string]any{"ok": true}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	}
+	p := chatPrincipal(f.host, "good")
+	if _, userErr, _ := f.srv.callCustom(context.Background(), p, "http://test", "mcp", spec, map[string]any{}, 1); userErr != customToolTimeoutMessage {
+		t.Fatalf("mcp call = %q, want the timeout", userErr)
+	}
+	ctx := context.WithValue(context.Background(), chatToolTimeoutKey{}, time.Second)
+	if _, userErr, _ := f.srv.callCustom(ctx, p, "http://test", "chat", spec, map[string]any{}, 1); userErr != "" {
+		t.Fatalf("chat call with ToolTimeout = %q, want success", userErr)
+	}
+	// The chat bound never reaches /mcp.
+	if _, userErr, _ := f.srv.callCustom(ctx, p, "http://test", "mcp", spec, map[string]any{}, 1); userErr != customToolTimeoutMessage {
+		t.Fatalf("mcp call with a chat timeout = %q, want the timeout", userErr)
+	}
+
+	base := ChatOptions{Namespace: "tests", Runner: f.runner, Store: f.store, Proposals: true}
+	tooLong := base
+	tooLong.DecisionTimeout = time.Minute
+	if _, err := f.srv.ChatHandler(tooLong); err == nil || !strings.Contains(err.Error(), "ToolTimeout") {
+		t.Fatalf("ChatHandler accepted DecisionTimeout > tool timeout: %v", err)
+	}
+	ok := tooLong
+	ok.ToolTimeout = time.Minute
+	if _, err := f.srv.ChatHandler(ok); err != nil {
+		t.Fatalf("ChatHandler with matching timeouts: %v", err)
+	}
+}
+
+// An empty user-safe message is still an error, never a success: OutcomeUnknown("")
+// stays unknown and Refused("") stays a refusal, on chat and on MCP.
+func TestEmptyUserErrorsStayErrors(t *testing.T) {
+	call := provider.ToolCall{ID: "call-1", Name: "send_campaign", Arguments: json.RawMessage(`{}`)}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want func(error) bool
+	}{
+		{"unknown", OutcomeUnknown(""), func(err error) bool { return errors.Is(err, chat.ErrOutcomeUnknown) }},
+		{"refused", Refused(""), func(err error) bool { var r chat.RefusedError; return errors.As(err, &r) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newProposalsFixture(t, proposalCallStep(call), textStep("waiting"))
+			spec := ToolSpec{
+				Name: "send_campaign", Channels: "both", Write: true, InputSchema: map[string]any{"type": "object"},
+				Handler: func(context.Context, CallContext, map[string]any) (any, error) { return nil, tc.err },
+			}
+			f.srv.cfg.CustomTools = append(f.srv.cfg.CustomTools, spec)
+			_, p := f.proposeTurn(t, call)
+			_, err := f.exec(t, false).(chat.ProposalExecutor).Execute(context.Background(), p)
+			if err == nil || !tc.want(err) {
+				t.Fatalf("Execute = %v", err)
+			}
+			if _, userErr, _ := f.srv.callCustom(context.Background(), chatPrincipal(f.host, "good"), "http://test", "mcp", spec, map[string]any{}, 1); userErr == "" {
+				t.Fatal("mcp call reported success")
+			}
+		})
+	}
+}
+
+// ChatAuthenticate carries ChatOptions.ToolTimeout to the executor, as the
+// handler's authenticator does.
+func TestChatAuthenticateCarriesToolTimeout(t *testing.T) {
+	f := newProposalsFixture(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/mcp/chat/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	caller, err := f.srv.ChatAuthenticate(req, ChatOptions{Namespace: "tests", Runner: f.runner, Store: f.store, ToolTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec, ok := caller.Tools.(*chatToolExecutor); !ok || exec.toolTimeout != time.Minute {
+		t.Fatalf("executor tool timeout = %+v", caller.Tools)
 	}
 }

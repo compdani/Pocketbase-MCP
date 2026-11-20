@@ -9,7 +9,6 @@ require (
 )
 
 require (
-	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/disintegration/imaging v1.6.2 // indirect
 	github.com/domodwyer/mailyak/v3 v3.6.2 // indirect
@@ -19,7 +18,6 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
 	github.com/ganigeorgiev/fexpr v0.6.0 // indirect
-	github.com/go-sql-driver/mysql v1.9.3 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/webauthn v0.17.4 // indirect
 	github.com/go-webauthn/x v0.2.6 // indirect
@@ -60,4 +58,4 @@ replace github.com/compdani/pocketbase-mcp => ../../
 
 replace github.com/compdani/pocketbase-mcp/adapters/pbpostgress => ../../adapters/pbpostgress
 
-replace github.com/pocketbase/pocketbase => github.com/compdani/pb-postgress v0.41.6
+replace github.com/pocketbase/pocketbase => github.com/compdani/pb-postgress v0.41.7

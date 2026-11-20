@@ -80,7 +80,6 @@ func NewProviderStore(app core.App, opts ProviderStoreOptions) (*ProviderStore, 
 	if app == nil {
 		return nil, errors.New("provider store: nil app")
 	}
-	noteChatDatabase(app)
 	if err := opts.Scope.Validate(); err != nil {
 		return nil, err
 	}

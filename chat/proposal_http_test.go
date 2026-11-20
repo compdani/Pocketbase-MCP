@@ -177,6 +177,8 @@ type proposalDetail struct {
 	NextCursor   string       `json:"nextCursor"`
 	ActiveTurn   *Turn        `json:"activeTurn"`
 	Proposals    []Proposal   `json:"proposals"`
+	// DecidedProposals are the recent terminal ones.
+	DecidedProposals []Proposal `json:"decidedProposals"`
 }
 
 func (f *apiFixture) conversationProposals(id string) []Proposal {
@@ -655,6 +657,13 @@ func TestProposalDecisionExecuteOutcomes(t *testing.T) {
 			notice:  "outcome unknown",
 		},
 		{
+			name:    "tool-reported unknown keeps its message",
+			err:     OutcomeUnknownError{Message: "The bank did not confirm the transfer."},
+			want:    ProposalStateUnknown,
+			failure: "The bank did not confirm the transfer.",
+			notice:  "outcome unknown",
+		},
+		{
 			name:    "generic error is unknown too",
 			err:     errors.New("driver detail that must not leak"),
 			want:    ProposalStateUnknown,
@@ -937,10 +946,45 @@ func TestProposalConversationListExpiresAndFilters(t *testing.T) {
 		t.Fatalf("overdue proposal state after sweep = %s, want expired", got.State)
 	}
 
-	// The field is a stable [] when the handler serves proposals.
-	res := f.call(http.MethodGet, testPrefix+"/conversations/"+mustConversationID(t, f, owner), nil, nil).expect(http.StatusOK)
-	if !bytes.Contains(res.body, []byte(`"proposals":[]`)) {
-		t.Fatalf("empty proposal list serialized as %s", res.body)
+	// A reopened conversation still returns what was decided, so a client can
+	// keep showing it (and anything it links to); none of it is decidable.
+	res := f.call(http.MethodGet, testPrefix+"/conversations/"+conv.ID, nil, nil).expect(http.StatusOK)
+	var detail proposalDetail
+	res.decode(&detail)
+	decided := map[string]ProposalState{}
+	for _, p := range detail.DecidedProposals {
+		decided[p.ID] = p.State
+	}
+	if len(decided) != 2 || decided[rejected.ID] != ProposalStateRejected || decided[expired.ID] != ProposalStateExpired {
+		t.Fatalf("decided proposals = %v, want the rejected and the expired one", decided)
+	}
+
+	// The fields are a stable [] when the handler serves proposals.
+	res = f.call(http.MethodGet, testPrefix+"/conversations/"+mustConversationID(t, f, owner), nil, nil).expect(http.StatusOK)
+	if !bytes.Contains(res.body, []byte(`"proposals":[]`)) || !bytes.Contains(res.body, []byte(`"decidedProposals":[]`)) {
+		t.Fatalf("empty proposal lists serialized as %s", res.body)
+	}
+}
+
+// Only the most recent decided proposals come back, oldest first.
+func TestProposalDecidedListIsBounded(t *testing.T) {
+	f, _ := newProposalFixture(t, fixtureOptions{})
+	owner := ownerFor("user-a")
+	conv := f.createConversation(nil)
+	var ids []string
+	for i := 0; i < maxDecidedProposals+3; i++ {
+		p := mustProposal(t, f.store, owner, serverProposal(conv.ID))
+		f.decide(p.ID, "reject", p.Revision, nil).expect(http.StatusOK)
+		ids = append(ids, p.ID)
+	}
+	res := f.call(http.MethodGet, testPrefix+"/conversations/"+conv.ID, nil, nil).expect(http.StatusOK)
+	var detail proposalDetail
+	res.decode(&detail)
+	if len(detail.DecidedProposals) != maxDecidedProposals {
+		t.Fatalf("decided proposals = %d, want %d", len(detail.DecidedProposals), maxDecidedProposals)
+	}
+	if first, last := detail.DecidedProposals[0].ID, detail.DecidedProposals[maxDecidedProposals-1].ID; first != ids[3] || last != ids[len(ids)-1] {
+		t.Fatalf("decided window = %s..%s, want %s..%s", first, last, ids[3], ids[len(ids)-1])
 	}
 }
 

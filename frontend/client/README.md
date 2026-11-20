@@ -140,7 +140,13 @@ entry) after the last summarized message.
 When the server turns on `TurnContext`, `/status` reports `features.context`
 and each turn may carry a plain object describing the user's page. Give the
 controller a `context` function; it is read once per send (retries reuse the
-same value) and only when the server accepts contexts:
+same value), at the moment `send()` is called, before any upload, so it
+describes the page the person sent from even if they move on while the send
+is in flight. It is skipped only when the server is known not to take
+contexts; a send made before `/status` answers waits for it instead of
+dropping the context. `chat.readContext()` reads it early (the binding does
+this before creating a conversation) and its result can be passed as
+`send(text, { context })`:
 
 ```js
 const chat = new ChatController({
@@ -207,6 +213,9 @@ frame can never undo a newer state and no proposal is ever duplicated. Terminal
 states (`rejected`, `expired`, `succeeded`, `failed`, `unknown`, `applied`,
 `stale`) stay visible through the rest of the view — the next `open()` is
 authoritative again — so a user sees what happened to the change they reviewed.
+`chat.state.decidedProposals` holds the conversation's most recent decided
+proposals from the server (at most 50), so a reopened conversation can still
+show what a decision did; nothing in it can be decided.
 
 ```js
 // Approve or reject at exactly the revision on screen.
@@ -386,10 +395,10 @@ binding registers with `defineEntry()`:
 ```js
 { id, type: 'text', role: 'user' | 'assistant', content, references? }
 { id, type: 'tools', tools: [{ id, name, status: 'running' | 'completed' | 'failed' }] }
-{ id, type: 'notice', content, proposalId?, state?, tool?, isError? }
+{ id, type: 'notice', content, proposalId?, state?, tool?, isError?, result?, proposal? }
 {
   id, type: 'proposal', proposalId, tool, summary, state, location, revision,
-  error, status, detail, warnings, canDecide,
+  error, status, detail, warnings, canDecide, proposal,
 }
 ```
 
@@ -402,6 +411,16 @@ binding registers with `defineEntry()`:
   `attachment`, id = upload id, label = stored file name, plus `mime`). No
   bytes and no data URLs go into the panel; a chip click downloads through the
   client. A message with only attachments is a chip-only entry.
+- A proposal entry's `proposal` is the whole stored proposal (arguments,
+  result, timestamps), and a notice carries the decision's stored `result`
+  plus the whole `proposal` when the controller has it (decided ones
+  included, so after a reopen too). A host renderer
+  (`element.defineEntry('proposal' | 'notice', render)` after binding) can
+  draw an "Open" link from them.
+- A `context` part (StoreContext) shows nothing by default; with
+  `options.contextReferences(context, message)` the binding adds the chips
+  it returns to that user message. Give them a `label` and a type other than
+  `attachment`; a click is the element's `agent-reference-open`.
 - Proposals follow the transcript: pending ones show **Approve**/**Reject**;
   every state has its own plain line ("applying on the server…", "applied in
   the editor — not saved yet", "may or may not have applied — check before
@@ -431,6 +450,28 @@ Events handled:
 | `agent-model-change` | Repaints, so the options menu offers the newly selected model's efforts. |
 | `agent-load-more` | `controller.loadMore()`. agent-panel 0.4.0+ emits it from the list's built-in "Load more" (shown while `hasMore`). `binding.loadMore()` does the same from code. |
 
+Every submit reports how it ended exactly once, to `options.onSend(result)`
+and as a bubbling `chat-send` event on the element: `{ status: 'accepted',
+text, turn, created }`, `{ status: 'refused' | 'failed', text, code, error,
+message }` (`refused` is the host's `Setup` hook, `turn_refused`; `message`
+is the line the binding shows) or `{ status: 'cancelled', text }` (superseded
+by an account switch or disposal). A submit the binding refuses itself
+(attachments with no text, or attachments on a server without uploads)
+reports `failed` with code `attachment_text_required` or
+`attachments_unsupported`. Nothing is reported after `unbind()`. A new
+submit clears the previous banner and hides the last error and the last
+turn's failure while the new message is on its way.
+
+`options.errorText(code, text, error)` replaces any error line the binding
+shows, proposal cards included, for translations: return a string to use it, anything else keeps the
+English. `code` is what `errorCode(error)` returns (the error's own code when
+the binding knows it, `network`, `timeout` or `resync_required` from the
+message, else `unknown`), or one of the binding's own `attachments_unsupported`,
+`attachment_text_required`, `upload_failed` and `download_unavailable`.
+`no_provider` (no model provider set up; `/status` reports
+`features.ready: false`) reads "AI isn't set up yet. Ask an administrator to
+add a model provider."
+
 Other `agent-action` kinds are ignored. Downloads use the `ChatClient` passed
 as `options.client`, then the controller's own client, and can be replaced with
 `options.download(uploadId, reference)`. `options.registerEntries: false` skips
@@ -440,9 +481,9 @@ element, not the class).
 
 `unbind()` removes every listener and stops writing to the element. The pure
 helpers are exported for tests and custom hosts: `entriesFromState(state,
-{ pendingText })`, `proposalEntryOf(proposal)`,
+{ pendingText, contextReferences })`, `proposalEntryOf(proposal)`,
 `proposalEntriesFromState(state)`, `proposalErrorText(error)`,
-`errorText(error)`, `conversationsFromState(state)`, `hasConversationList(element)`,
+`errorText(error)`, `errorCode(error)`, `conversationsFromState(state)`, `hasConversationList(element)`,
 `modelsFromState(state)`, `effortOptionFromState(state, model)` and
 `isPageElement(element)`, `contextUsageFromState(state)` and
 `renderContextMarkerEntry(entry)`. `errorText` maps the failure codes a failed

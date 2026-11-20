@@ -69,6 +69,9 @@ type chatEnvOptions struct {
 	enable func(*Server) error
 	// chatOnly sets Config.DisableMCPEndpoint.
 	chatOnly bool
+	// catchAll registers an app route "GET /{path...}" (an SPA fallback)
+	// before the server's routes.
+	catchAll bool
 }
 
 func fixedSteps(steps ...scripted.Step) func(*chatEnv) []scripted.Step {
@@ -231,6 +234,11 @@ func newChatEnv(t *testing.T, opts chatEnvOptions) *chatEnv {
 	r, err := apis.NewRouter(app)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if opts.catchAll {
+		r.GET("/{path...}", func(e *core.RequestEvent) error {
+			return e.String(http.StatusOK, "app catch-all")
+		})
 	}
 	if err := srv.RegisterRoutes(r); err != nil {
 		t.Fatal(err)
@@ -1102,5 +1110,32 @@ func TestChatOnlyMountsNoMCPEndpoint(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("%s: HTTP %d, want 404", path, rec.Code)
 		}
+	}
+}
+
+// An app with a "GET /{path...}" catch-all (an SPA fallback) must still serve
+// chat. A method-less chat route would make ServeMux panic on the conflict.
+func TestChatRoutesCoexistWithAppCatchAll(t *testing.T) {
+	env := newChatEnv(t, chatEnvOptions{catchAll: true})
+	if code := env.json(env.userToken, http.MethodGet, chatTestPrefix+"/status", "", nil); code != http.StatusOK {
+		t.Fatalf("chat status: HTTP %d", code)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if code := env.json(env.userToken, http.MethodPost, chatTestPrefix+"/conversations", `{}`, &created); code != http.StatusCreated {
+		t.Fatalf("create conversation: HTTP %d", code)
+	}
+	if code := env.json(env.userToken, http.MethodDelete, chatTestPrefix+"/conversations/"+created.ID, "", nil); code != http.StatusNoContent {
+		t.Fatalf("delete conversation: HTTP %d", code)
+	}
+	// An unsupported method still gets the chat handler's JSON 405.
+	code, body := env.do(env.userToken, http.MethodPut, chatTestPrefix+"/status", "")
+	if code != http.StatusMethodNotAllowed || !strings.Contains(string(body), "method_not_allowed") {
+		t.Fatalf("PUT status: HTTP %d %s", code, body)
+	}
+	// The catch-all still owns everything else.
+	if code, body := env.do("", http.MethodGet, "/some/page", ""); code != http.StatusOK || string(body) != "app catch-all" {
+		t.Fatalf("catch-all: HTTP %d %s", code, body)
 	}
 }

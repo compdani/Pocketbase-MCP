@@ -75,6 +75,7 @@ function initialState() {
     messages: [],
     transcript: [],
     proposals: [],
+    decidedProposals: [],
     pendingUploads: [],
     turn: null,
     running: false,
@@ -87,6 +88,12 @@ function initialState() {
     choice: '',
     context: null,
   };
+}
+
+/** The decided proposals of a conversation detail, or [] (older servers). */
+function decidedOf(detail) {
+  const list = Array.isArray(detail?.decidedProposals) ? detail.decidedProposals : [];
+  return list.filter((p) => p && typeof p === 'object' && p.id);
 }
 
 /** Keep a well-formed context status from the server, or null. */
@@ -755,6 +762,7 @@ export class ChatController extends EventTarget {
       if (Array.isArray(detail?.proposals)) {
         patch.proposals = this._mergeServerProposals(detail.proposals);
       }
+      if (Array.isArray(detail?.decidedProposals)) patch.decidedProposals = decidedOf(detail);
       if (detail && 'context' in detail) patch.context = contextOf(detail.context);
       if (Object.keys(patch).length > 0) this._set(patch);
       // A nearly full conversation is summarized in the background after
@@ -809,6 +817,7 @@ export class ChatController extends EventTarget {
       if (Array.isArray(detail?.proposals)) {
         patch.proposals = this._mergeServerProposals(detail.proposals);
       }
+      if (Array.isArray(detail?.decidedProposals)) patch.decidedProposals = decidedOf(detail);
       this._set(patch);
       if (terminal) return;
 
@@ -869,7 +878,13 @@ export class ChatController extends EventTarget {
 
   /** Load status and the first conversation page. */
   init() {
-    return this._track(this._init());
+    const pending = this._track(this._init());
+    this._initPending = pending;
+    const clear = () => {
+      if (this._initPending === pending) this._initPending = null;
+    };
+    pending.then(clear, clear);
+    return pending;
   }
 
   async _init() {
@@ -934,12 +949,13 @@ export class ChatController extends EventTarget {
 
     // Clear everything the previous account owned before any new request.
     this._state = initialState();
+    this._initPending = null;
     this.dispatchEvent(new Event('change'));
     // The sync channel is named after the account: reopen it for the new one.
     this._startSync();
 
     if (!accountKey) return this._state;
-    return this._track(this._init());
+    return this.init();
   }
 
   /** Drop every subscription. The controller is unusable afterwards. */
@@ -1043,6 +1059,7 @@ export class ChatController extends EventTarget {
         activeConversationId: null,
         messages: [],
         proposals: [],
+        decidedProposals: [],
         pendingUploads: [],
         turn: null,
         running: false,
@@ -1068,6 +1085,7 @@ export class ChatController extends EventTarget {
       activeConversationId: null,
       messages: [],
       proposals: [],
+      decidedProposals: [],
       pendingUploads: [],
       turn: null,
       running: false,
@@ -1091,6 +1109,7 @@ export class ChatController extends EventTarget {
       activeConversationId: conversationId,
       messages: [],
       proposals: [],
+      decidedProposals: [],
       pendingUploads: [],
       turn: null,
       running: false,
@@ -1120,6 +1139,7 @@ export class ChatController extends EventTarget {
           conversations,
           messages,
           proposals: mergeProposals([], proposals),
+          decidedProposals: decidedOf(detail),
           turn: view,
           running: !isTerminalState(active.state),
           context: contextOf(detail?.context),
@@ -1133,6 +1153,7 @@ export class ChatController extends EventTarget {
           conversations,
           messages,
           proposals: mergeProposals([], proposals),
+          decidedProposals: decidedOf(detail),
           turn: null,
           running: false,
           context: contextOf(detail?.context),
@@ -1165,6 +1186,7 @@ export class ChatController extends EventTarget {
         activeConversationId: conversation.id,
         messages: [],
         proposals: [],
+        decidedProposals: [],
         pendingUploads: [],
         turn: null,
         running: false,
@@ -1302,6 +1324,7 @@ export class ChatController extends EventTarget {
             activeConversationId: null,
             messages: [],
             proposals: [],
+            decidedProposals: [],
             pendingUploads: [],
             turn: null,
             running: false,
@@ -1684,7 +1707,33 @@ export class ChatController extends EventTarget {
    * `state`.
    */
   send(text, options = {}) {
-    return this._track(this._send(text, options));
+    // The page context is read now, before any upload or round trip, so it
+    // describes the page the person sent from even if they move on while
+    // the send is in flight.
+    // A server known not to take contexts never gets the provider called.
+    const opts = options ?? {};
+    const features = this._state.features;
+    const wanted = !features || features.context === true;
+    const context = opts.context !== undefined ? opts.context : wanted ? this.readContext() : undefined;
+    // A context the server turns out not to take is never awaited; don't let
+    // a failed read become an unhandled rejection.
+    if (context && typeof context.catch === 'function') context.catch(() => {});
+    return this._track(this._send(text, { ...opts, context }));
+  }
+
+  /**
+   * Read the page context once from the `context` provider, as a Promise
+   * (undefined without a provider). The provider is called synchronously, so
+   * a caller that has to do something slow before `send()` (create the
+   * conversation, say) can read it first and pass it as `options.context`.
+   */
+  readContext() {
+    if (!this._context) return undefined;
+    try {
+      return Promise.resolve(this._context());
+    } catch (err) {
+      return Promise.reject(err);
+    }
   }
 
   async _send(text, { model, provider, effort, attachments, context } = {}) {
@@ -1696,6 +1745,20 @@ export class ChatController extends EventTarget {
       throw new TypeError('ChatController.send() requires non-empty text');
     }
     if (this._disposed) return null;
+    // A new send starts clean: an error left by the previous one would
+    // otherwise stay on screen until this one is accepted.
+    if (this._state.error) this._set({ error: null });
+    // A send made before /status answered waits for it before anything that
+    // depends on it (choices, efforts, upload limits, page context).
+    if (!this._state.features && this._initPending) {
+      const epochBefore = this._epoch;
+      try {
+        await this._initPending;
+      } catch {
+        // init reports its own failure.
+      }
+      if (!this._current(epochBefore)) return null;
+    }
 
     const selected = resolveChoice(this._state.choices, model ?? this._state.choice);
     if (selected) {
@@ -1714,12 +1777,14 @@ export class ChatController extends EventTarget {
       if (attachmentIds === null || !this._current(epoch)) return null;
     }
 
-    // The page context is read once per send, so every retry of this
-    // submission carries the same one. Only a server that accepts contexts
-    // gets one.
+    // The page context was read when send() was called, so every retry of
+    // this submission carries the same one. Only a server that accepts
+    // contexts gets one; if the features are still unknown (status failed),
+    // the context goes along and the server decides.
     let turnContext;
-    if (this._state.features?.context) {
-      turnContext = context !== undefined ? context : this._context ? await this._context() : undefined;
+    const features = this._state.features;
+    if (!features || features.context) {
+      turnContext = await context;
       if (!this._current(epoch)) return null;
     }
 

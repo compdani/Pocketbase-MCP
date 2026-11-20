@@ -4,12 +4,15 @@ package pbpostgress
 // chat.UploadStore for the pb-postgress fork.
 //
 // It is the stock adapter's chat store (adapters/pocketbase/chatstore.go) ported
-// to a fork app whose data lives in PostgreSQL or MySQL instead of SQLite. The
-// public shape is deliberately identical, but four things had to change:
+// to a fork app whose data lives in PostgreSQL instead of SQLite (the fork is
+// PostgreSQL-only since v0.41.7). The public shape is deliberately identical,
+// but four things had to change:
 //
-//  1. Portable uniqueness. SQLite partial indexes ("UNIQUE ... WHERE x != ''")
-//     have no MySQL equivalent, so every invariant uses a plain UNIQUE index
-//     over a column whose value is unique by construction:
+//  1. Plain uniqueness. The store was written when the fork also ran on MySQL,
+//     which has no partial indexes ("UNIQUE ... WHERE x != ''"), so every
+//     invariant uses a plain UNIQUE index over a column whose value is unique
+//     by construction. Existing installations have these indexes, so they
+//     stay:
 //       - turns.activeSlot holds the conversation id while the turn is
 //         non-terminal, and "done:<turn id>" once it is terminal, so
 //         UNIQUE(activeSlot) means "one active turn per conversation";
@@ -19,9 +22,7 @@ package pbpostgress
 //         UNIQUE(idempotencySlot) is exactly "one turn per
 //         (owner, conversation, key)" and never confuses two keyless turns.
 //         A digest keeps the index at 68 characters instead of a
-//         three-column index over 255-character utf8mb4 columns
-//         (3 * 255 * 4 = 3060 bytes, with no headroom under MySQL's
-//         3072-byte limit);
+//         three-column index over 255-character columns;
 //       - events keeps UNIQUE(turn, seq).
 //
 //  2. A shared database with several app instances. Chat collections are
@@ -32,7 +33,7 @@ package pbpostgress
 //     the chat namespace and mount and InterruptRunning only touches turns in
 //     that scope, so restarting one app cannot interrupt another app's turns.
 //
-//  3. PostgreSQL/MySQL transactions really run concurrently across app
+//  3. PostgreSQL transactions really run concurrently across app
 //     instances (unlike SQLite, where every write transaction shares one
 //     connection). State compare-and-swap, per-turn sequence assignment and
 //     turn creation therefore take a row lock with SELECT ... FOR UPDATE and
@@ -42,15 +43,13 @@ package pbpostgress
 //     winner's committed state, so no snapshot juggling is needed.
 //
 //  4. JSON payloads are stored as TEXT, not as the fork's json/jsonb column.
-//     PostgreSQL JSONB and MySQL JSON both normalize the value they store
-//     (key order, whitespace, duplicate keys), but chat.Store must return the
-//     caller's bytes exactly as written (the shared store contract checks
-//     this), so the columns hold the raw JSON text and the store unmarshals on
-//     read. MySQL TEXT stops at 64 KiB, so on MySQL the store rejects payloads
-//     above 60 KiB with a clear error before the database does. PostgreSQL
-//     TEXT has no limit; there a payload may be as long as the field allows
-//     (chatJSONFieldMaxChars, 4 MiB, as on stock PocketBase). See
-//     chatJSONLimit.
+//     PostgreSQL JSONB normalizes the value it stores (key order, whitespace,
+//     duplicate keys), but chat.Store must return the caller's bytes exactly
+//     as written (the shared store contract checks this), so the columns hold
+//     the raw JSON text and the store unmarshals on read. PostgreSQL TEXT has
+//     no limit; a payload may be as long as the field allows
+//     (chatMaxJSONBytes, 4 MiB, as on stock PocketBase), and the store
+//     refuses a longer one with a clear error before the database sees it.
 
 import (
 	"context"
@@ -152,33 +151,26 @@ const (
 	chatFieldUploadSHA256       = "sha256"
 	chatFieldUploadData         = "data"
 
-	// chatMaxTextLen bounds every short text field. The fork maps an
-	// unbounded text field to VARCHAR(255) on MySQL anyway, and an explicit
-	// bound makes an over-long value a validation error instead of a driver
-	// error.
+	// chatMaxTextLen bounds every short text field, so an over-long value is
+	// a validation error. Existing collections carry this bound, so it stays.
 	chatMaxTextLen = 255
 	// chatSlotMaxLen bounds the two derived uniqueness columns. Their real
 	// content is at most 68 characters ("key:" + 64 hex chars).
 	chatSlotMaxLen = 200
-	// chatJSONFieldMaxChars makes the fork create a TEXT column on MySQL
-	// (it promotes text fields with Max > 255) and an unbounded TEXT column
-	// on PostgreSQL. The effective bound is chatJSONMax().
+	// chatJSONFieldMaxChars is the field maximum of every JSON payload
+	// column (an unbounded TEXT column on PostgreSQL).
 	chatJSONFieldMaxChars = 4 << 20
-	// chatMaxJSONBytesMySQL is the payload limit on MySQL, whose TEXT stops
-	// at 64 KiB: values are rejected in Go before the database truncates or
-	// errors.
-	chatMaxJSONBytesMySQL = 60 << 10
-	// chatMaxJSONBytesPostgres is the payload limit on PostgreSQL, whose TEXT
-	// is unbounded: the field's own maximum (in characters, so at least as
-	// many bytes for ASCII), kept so existing collections need no change.
-	chatMaxJSONBytesPostgres = chatJSONFieldMaxChars
+	// chatMaxJSONBytes is the payload limit: the field's own maximum (in
+	// characters, so at least as many bytes for ASCII), checked in Go so an
+	// over-long payload fails with a clear error.
+	chatMaxJSONBytes = chatJSONFieldMaxChars
 	// chatMaxIdempotencyKeyBytes bounds one client Idempotency-Key. Keys are
 	// stored verbatim (they are returned to the caller) but never indexed:
 	// the index covers the digest column instead.
 	chatMaxIdempotencyKeyBytes = 4 << 10
-	// chatIdempotencyKeyFieldMax is the storage bound for a client key. It is
-	// larger than 255 so the fork maps it to TEXT on MySQL (the key is not
-	// part of any index); chatMaxIdempotencyKeyBytes is the real limit.
+	// chatIdempotencyKeyFieldMax is the storage bound for a client key (the
+	// key is not part of any index); chatMaxIdempotencyKeyBytes is the real
+	// limit.
 	chatIdempotencyKeyFieldMax = 1 << 20
 
 	chatDefaultPageLimit = 50
@@ -264,7 +256,6 @@ func NewChatStore(app core.App, opts ChatStoreOptions) (*ChatStore, error) {
 	if app == nil {
 		return nil, errors.New("chat store: nil app")
 	}
-	noteChatDatabase(app)
 	if (opts.Namespace == "") != (opts.Mount == "") {
 		return nil, errors.New("chat store: namespace and mount must be set together (both empty means an unscoped store)")
 	}
@@ -392,10 +383,8 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 			// stores gain them in place.
 			addFields: []string{chatFieldContextSummary, chatFieldImportSource},
 			indexes: []chatIndexSpec{
-				// Both columns are VARCHAR(255) on MySQL, so two text
-				// columns (2040 bytes in utf8mb4) stay well below the
-				// 3072-byte InnoDB key limit. The id tie-break is applied by
-				// the ORDER BY, not by the index.
+				// The id tie-break is applied by the ORDER BY, not by the
+				// index.
 				{name: "idx_" + s.conversations + "_owner_created", columns: chatFieldOwnerKey + ", " + chatFieldCreatedAt},
 			},
 		},
@@ -502,7 +491,7 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 			indexes: []chatIndexSpec{
 				// The per-conversation list order is served by this index; the
 				// id tie-break is applied by the ORDER BY, as in the other
-				// collections (MySQL has no index size headroom for it).
+				// collections.
 				{name: "idx_" + s.proposals + "_owner_conversation", columns: chatFieldOwnerKey + ", " + chatFieldProposalConversation},
 				// The expiry sweep and restart recovery scan by state; the
 				// second index covers the deadline filter.
@@ -531,9 +520,7 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 			},
 			indexes: []chatIndexSpec{
 				// The newest-first list, the per-conversation count and the
-				// delete cascade all scan by (owner, conversation). ownerKey and
-				// conversationId are VARCHAR(255), so the two columns stay well
-				// below MySQL's InnoDB key limit.
+				// delete cascade all scan by (owner, conversation).
 				{name: "idx_" + s.uploads + "_owner_conversation", columns: chatFieldOwnerKey + ", " + chatFieldUploadConversation + ", " + chatFieldCreatedAt},
 			},
 		},
@@ -542,8 +529,7 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 
 func provisionChatCollection(app core.App, spec chatCollectionSpec) (bool, error) {
 	// Collections are provisioned one at a time rather than in one enclosing
-	// transaction: MySQL DDL is not transactional, and on PostgreSQL a
-	// concurrent create that loses the name race aborts the whole transaction,
+	// transaction: on PostgreSQL a concurrent create that loses the name race aborts the whole transaction,
 	// which would discard the collections this instance had already created.
 	// Each create is idempotent on its own, so a partial pass is simply
 	// completed by re-reading (or by the next start).
@@ -564,9 +550,8 @@ func provisionChatCollection(app core.App, spec chatCollectionSpec) (bool, error
 	}
 	if err := app.Save(col); err != nil {
 		// Another instance may have created the collection between our read
-		// and our create. Re-read: if it is there now, adopt it. MySQL DDL is
-		// not transactional, so the visible metadata and table can briefly
-		// disagree; retry a few times for that window.
+		// and our create. Re-read: if it is there now, adopt it, retrying a
+		// few times while the winner's commit becomes visible.
 		for attempt := 0; attempt < 5; attempt++ {
 			if again, ferr := app.FindCollectionByNameOrId(spec.name); ferr == nil && again != nil {
 				return adoptChatCollection(app, spec, again)
@@ -581,13 +566,13 @@ func provisionChatCollection(app core.App, spec chatCollectionSpec) (bool, error
 	return true, nil
 }
 
-// adoptChatCollection checks an existing collection and repairs a metadata/table
-// mismatch left by a non-transactional DDL race.
+// adoptChatCollection checks an existing collection and repairs a collection
+// whose table is missing.
 func adoptChatCollection(app core.App, spec chatCollectionSpec, existing *core.Collection) (bool, error) {
 	if !app.HasTable(existing.Name) {
-		// The collection record committed but its table did not (possible on
-		// MySQL, where DDL implicitly commits). Recreate the missing table
-		// from the metadata rather than failing startup.
+		// The collection record exists but its table does not (a table
+		// dropped by hand, say). Recreate the missing table from the metadata rather than
+		// failing startup.
 		if err := app.SyncRecordTableSchema(existing, nil); err != nil {
 			return false, fmt.Errorf("chat store: create missing table for collection %q: %w", spec.name, err)
 		}
@@ -605,7 +590,7 @@ func adoptChatCollection(app core.App, spec chatCollectionSpec, existing *core.C
 		}
 		// A text field's maximum only ever rises (v1.4 raised the JSON
 		// payload fields from 1 MiB to 4 MiB characters). The column type
-		// doesn't change: TEXT on PostgreSQL and on MySQL alike.
+		// doesn't change: TEXT either way.
 		if gotText, ok := got.(*core.TextField); ok {
 			if wantText, ok := want.(*core.TextField); ok && gotText.Max > 0 && wantText.Max > gotText.Max {
 				gotText.Max = wantText.Max
@@ -751,56 +736,12 @@ func chatRawJSON(rec *core.Record, name string) json.RawMessage {
 	return json.RawMessage(append([]byte(nil), s...))
 }
 
-// chatJSONLimit is the JSON payload limit for the database in use. It starts
-// at the MySQL limit, the safe one, and rises to the PostgreSQL limit once a
-// store is created on PostgreSQL (noteChatDatabase). A fork app runs on one
-// database, so the limit is per process; if a MySQL-backed store ever shares
-// the process, the limit stays at MySQL's.
-var (
-	chatJSONLimit     atomic.Int64
-	chatJSONLimitOnce sync.Once
-	chatSawMySQL      atomic.Bool
-)
-
-func chatJSONMax() int {
-	chatJSONLimitOnce.Do(func() {
-		if chatJSONLimit.Load() == 0 {
-			chatJSONLimit.Store(chatMaxJSONBytesMySQL)
-		}
-	})
-	return int(chatJSONLimit.Load())
-}
-
-// noteChatDatabase sets chatJSONLimit from the app's database driver.
-func noteChatDatabase(app core.App) {
-	chatJSONMax()
-	driver := ""
-	// DB() is the fork's dual builder; the write connection is a plain
-	// *dbx.DB that knows its driver.
-	for _, b := range []any{app.NonconcurrentDB(), app.DB()} {
-		if db, ok := b.(interface{ DriverName() string }); ok {
-			driver = db.DriverName()
-			break
-		}
-	}
-	switch driver {
-	case "pgx", "postgres":
-		if !chatSawMySQL.Load() {
-			chatJSONLimit.Store(chatMaxJSONBytesPostgres)
-		}
-	default:
-		// MySQL, or a driver we don't know: the safe limit, for good.
-		chatSawMySQL.Store(true)
-		chatJSONLimit.Store(chatMaxJSONBytesMySQL)
-	}
-}
-
 func chatSetJSON(rec *core.Record, name string, raw json.RawMessage) error {
 	if len(raw) == 0 {
 		rec.Set(name, "")
 		return nil
 	}
-	if limit := chatJSONMax(); len(raw) > limit {
+	if limit := chatMaxJSONBytes; len(raw) > limit {
 		return fmt.Errorf("chat store: %s payload is %d bytes, over this database's limit of %d", name, len(raw), limit)
 	}
 	rec.Set(name, string(raw))
@@ -948,7 +889,7 @@ func chatCollection(app core.App, name string) (*core.Collection, error) {
 // chatLockOwned locks one owned row for the rest of the transaction and
 // reports chat.ErrNotFound when it does not exist or belongs to somebody else.
 //
-// Locking is what makes a read-then-write decision safe on PostgreSQL/MySQL:
+// Locking is what makes a read-then-write decision safe on PostgreSQL:
 // two app instances sharing one database run these transactions concurrently,
 // and the loser of a lock waits here and then reads the winner's committed
 // state. The table names are package constants, never user input, and every
@@ -981,7 +922,7 @@ func (s *ChatStore) chatLockConversation(tx core.App, owner chat.OwnerKey, id st
 }
 
 // chatUniqueViolation reports a database uniqueness failure. It recognises the
-// driver errors of both fork dialects, the validation error PocketBase derives
+// PostgreSQL driver error, the validation error PocketBase derives
 // from a single-column unique index, and it never treats NOT NULL, foreign key
 // or check violations as unique.
 func chatUniqueViolation(err error) bool {
@@ -995,7 +936,6 @@ func chatUniqueViolation(err error) bool {
 		"sqlstate 23502", "not-null constraint", "not null constraint",
 		"sqlstate 23503", "foreign key constraint",
 		"sqlstate 23514", "check constraint",
-		"error 1048", "error 1452", "error 3819",
 	} {
 		if strings.Contains(msg, notUnique) {
 			return false
@@ -1004,9 +944,8 @@ func chatUniqueViolation(err error) bool {
 	for _, unique := range []string{
 		"sqlstate 23505", // PostgreSQL SQLSTATE
 		"duplicate key value violates unique constraint", // PostgreSQL
-		"error 1062", "duplicate entry", // MySQL 1062
-		"value must be unique",     // PocketBase's normalized index error
-		"unique constraint failed", // SQLite wording (defensive)
+		"value must be unique",                           // PocketBase's normalized index error
+		"unique constraint failed",                       // SQLite wording (defensive)
 	} {
 		if strings.Contains(msg, unique) {
 			return true
@@ -1028,7 +967,6 @@ func chatRetryableTxError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "deadlock detected") ||
 		strings.Contains(msg, "could not serialize access") ||
-		strings.Contains(msg, "lock wait timeout") ||
 		strings.Contains(msg, "database is locked")
 }
 
@@ -1994,7 +1932,7 @@ func (s *ChatStore) ImportConversation(ctx context.Context, owner chat.OwnerKey,
 		if err != nil {
 			return chat.Conversation{}, false, err
 		}
-		if limit := chatJSONMax(); len(raw) > limit {
+		if limit := chatMaxJSONBytes; len(raw) > limit {
 			return chat.Conversation{}, false, fmt.Errorf("%w: message %d is %d bytes, over this store's %d-byte limit per message",
 				chat.ErrInvalidImport, i, len(raw), limit)
 		}

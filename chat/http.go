@@ -63,6 +63,11 @@ const (
 	// anything. The proposal is pending again (it accompanies the error) with
 	// the reason as its failure, so the user can fix it and approve again.
 	CodeRefused = "refused"
+	// CodeNoProvider reports a turn submitted while no model provider is set
+	// up, so there is nothing to answer it. It is a deployment state, not a
+	// bad request: /status reports it ahead of time as features.ready false.
+	// Nothing was stored.
+	CodeNoProvider = "no_provider"
 )
 
 // Fixed, user-safe error messages. Server-internal error text is never echoed.
@@ -97,6 +102,7 @@ const (
 	msgTooManyUploads      = "The conversation has too many uploads."
 	msgInvalidAttachment   = "An attachment is invalid."
 	msgUnsupportedAttach   = "An attachment type is not supported."
+	msgNoProvider          = "AI isn't set up yet."
 )
 
 const (
@@ -845,6 +851,9 @@ func (h *handler) activeTurn(ctx context.Context, owner OwnerKey, conversationID
 // --- response shapes ---
 
 type featuresView struct {
+	// Ready is false while no model provider is set up, so a turn would be
+	// refused with no_provider. Always present.
+	Ready     bool `json:"ready"`
 	Proposals bool `json:"proposals"`
 	Uploads   bool `json:"uploads"`
 	// Context is only present when turns accept a page context.
@@ -905,8 +914,14 @@ type conversationDetailWithProposalsView struct {
 	NextCursor   string       `json:"nextCursor"`
 	ActiveTurn   *Turn        `json:"activeTurn"`
 	// Proposals lists pending, approved and executing proposals, oldest first.
-	Proposals []Proposal     `json:"proposals"`
-	Context   *ContextStatus `json:"context,omitempty"`
+	Proposals []Proposal `json:"proposals"`
+	// DecidedProposals lists the conversation's most recent terminal
+	// proposals (applied, failed, rejected and so on), oldest first, at most
+	// maxDecidedProposals, so a reopened conversation can still show what a
+	// decision did (an "Open" link to a created record, say). Nothing in it
+	// can be decided.
+	DecidedProposals []Proposal     `json:"decidedProposals"`
+	Context          *ContextStatus `json:"context,omitempty"`
 }
 
 type submitTurnView struct {
@@ -1242,6 +1257,7 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 		Choices:       choices,
 		DefaultChoice: defaultChoice.ID,
 		Features: featuresView{
+			Ready:             h.ready(r.Context(), choices),
 			Proposals:         h.cfg.Proposals != nil,
 			Uploads:           h.cfg.Uploads != nil,
 			Context:           h.cfg.TurnContext,
@@ -1250,6 +1266,18 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 		},
 		Limits: limits,
 	})
+}
+
+// ready reports whether any model can answer a turn: with a router, whether
+// it offers at least one choice; otherwise whether the single provider
+// and model are configured. Other lookup failures count as ready, so a
+// transient error never tells a client that AI isn't set up.
+func (h *handler) ready(ctx context.Context, choices []ModelChoice) bool {
+	if h.cfg.Router != nil {
+		return len(choices) > 0
+	}
+	_, err := h.cfg.Runner.DefaultChoice(ctx)
+	return !errors.Is(err, ErrNoModelConfigured)
 }
 
 // modelIDs flattens choices into the legacy de-duplicated model list.
@@ -1397,13 +1425,19 @@ func (h *handler) getConversation(w http.ResponseWriter, r *http.Request) {
 		h.storeError(w, err)
 		return
 	}
+	decided, err := h.decidedProposals(r.Context(), caller.Owner, conv.ID)
+	if err != nil {
+		h.storeError(w, err)
+		return
+	}
 	h.writeJSON(w, http.StatusOK, conversationDetailWithProposalsView{
-		Conversation: conv,
-		Messages:     msgs,
-		NextCursor:   next,
-		ActiveTurn:   active,
-		Proposals:    proposals,
-		Context:      contextStatus,
+		Conversation:     conv,
+		Messages:         msgs,
+		NextCursor:       next,
+		ActiveTurn:       active,
+		Proposals:        proposals,
+		DecidedProposals: decided,
+		Context:          contextStatus,
 	})
 }
 
@@ -1486,6 +1520,8 @@ func (h *handler) compactConversation(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusConflict, CodeConflict, msgCompactionBusy)
 	case errors.Is(err, ErrCompactionTooSoon):
 		h.writeError(w, http.StatusTooManyRequests, CodeTooSoon, msgCompactionTooSoon)
+	case errors.Is(err, ErrNoModelConfigured):
+		h.writeError(w, http.StatusServiceUnavailable, CodeNoProvider, msgNoProvider)
 	case errors.Is(err, ErrNotFound):
 		h.storeError(w, err)
 	default:
@@ -1622,6 +1658,12 @@ func (h *handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 	var target *ResolvedModel
 	if h.cfg.Router != nil {
 		resolved, err := h.cfg.Router.Resolve(r.Context(), provider, model)
+		if errors.Is(err, ErrNoModelConfigured) {
+			// Nothing is set up to answer: a deployment state, not a bad
+			// request, so the client can say "AI isn't set up".
+			h.writeError(w, http.StatusServiceUnavailable, CodeNoProvider, msgNoProvider)
+			return
+		}
 		if err != nil {
 			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
 			return
@@ -1683,7 +1725,11 @@ func (h *handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusBadRequest, CodeTurnRefused, refused.Message)
 			return
 		}
-		if errors.Is(err, ErrModelUnknown) || errors.Is(err, ErrModelAmbiguous) || errors.Is(err, ErrNoModelConfigured) || errors.Is(err, ErrEffortUnsupported) {
+		if errors.Is(err, ErrNoModelConfigured) {
+			h.writeError(w, http.StatusServiceUnavailable, CodeNoProvider, msgNoProvider)
+			return
+		}
+		if errors.Is(err, ErrModelUnknown) || errors.Is(err, ErrModelAmbiguous) || errors.Is(err, ErrEffortUnsupported) {
 			h.writeError(w, http.StatusBadRequest, CodeInvalidRequest, msgInvalidRequest)
 			return
 		}

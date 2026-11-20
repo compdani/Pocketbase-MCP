@@ -87,6 +87,12 @@ type ChatOptions struct {
 	// Zero means the chat default (30s). Execution is detached from the request,
 	// so a client disconnect cannot leave it half-recorded.
 	DecisionTimeout time.Duration
+	// ToolTimeout bounds one custom tool call made by chat (a turn's tool
+	// step or an approved proposal), for tools that set no Timeout of their
+	// own. Zero means Config.MaxToolTimeout, the /mcp bound. An explicit
+	// DecisionTimeout longer than it is refused: the tool would be cut off
+	// first and the approval would end as "outcome unknown".
+	ToolTimeout time.Duration
 	// TargetCheck validates a client-supplied target reference for a caller.
 	// Nil means targets are unsupported.
 	TargetCheck func(r *http.Request, c chat.Caller, target string) error
@@ -155,7 +161,7 @@ func (s *Server) ChatHandler(opts ChatOptions) (http.Handler, error) {
 		Prefix:                    prefix,
 		Runner:                    opts.Runner,
 		Store:                     opts.Store,
-		Auth:                      &chatAuthenticator{s: s, namespace: opts.Namespace, policy: opts.Policy, writes: opts.Proposals, autoApprove: opts.AutoApprove},
+		Auth:                      &chatAuthenticator{s: s, namespace: opts.Namespace, policy: opts.Policy, writes: opts.Proposals, autoApprove: opts.AutoApprove, toolTimeout: opts.ToolTimeout},
 		Router:                    opts.Router,
 		ProviderAdmin:             opts.ProviderAdmin,
 		AdminAuth:                 opts.AdminAuth,
@@ -194,6 +200,18 @@ func (s *Server) validateChatOptions(opts ChatOptions, prefix string) error {
 	}
 	if opts.AutoApprove && !opts.Proposals {
 		return errors.New("pocketbase-mcp: chat auto-approve requires proposals")
+	}
+	if opts.ToolTimeout < 0 || opts.DecisionTimeout < 0 {
+		return errors.New("pocketbase-mcp: chat timeouts must not be negative")
+	}
+	if opts.Proposals && opts.DecisionTimeout > 0 {
+		toolTimeout := opts.ToolTimeout
+		if toolTimeout == 0 {
+			toolTimeout = s.cfg.MaxToolTimeout
+		}
+		if opts.DecisionTimeout > toolTimeout {
+			return fmt.Errorf("pocketbase-mcp: chat DecisionTimeout (%s) is longer than the chat tool timeout (%s), so an approved change would be cut off first; set ChatOptions.ToolTimeout as well", opts.DecisionTimeout, toolTimeout)
+		}
 	}
 	if opts.Proposals {
 		// Review is the only chat path to a write, so a host that could offer a
@@ -280,7 +298,11 @@ func (s *Server) ChatAuthenticate(r *http.Request, opts ChatOptions) (chat.Calle
 	if err != nil {
 		return chat.Caller{}, err
 	}
-	return s.chatCallerWithWrites(p, r, opts.Namespace, opts.Policy, opts.Proposals, opts.AutoApprove), nil
+	caller := s.chatCallerWithWrites(p, r, opts.Namespace, opts.Policy, opts.Proposals, opts.AutoApprove)
+	if exec, ok := caller.Tools.(*chatToolExecutor); ok {
+		exec.toolTimeout = opts.ToolTimeout
+	}
+	return caller, nil
 }
 
 // ChatCaller builds a read-only chat.Caller for a principal the adapter already
@@ -321,6 +343,8 @@ type chatAuthenticator struct {
 	// handler's lifetime, so a request can never widen them.
 	writes      bool
 	autoApprove bool
+	// toolTimeout is ChatOptions.ToolTimeout (zero: Config.MaxToolTimeout).
+	toolTimeout time.Duration
 }
 
 func (a *chatAuthenticator) Authenticate(r *http.Request) (chat.Caller, error) {
@@ -328,8 +352,16 @@ func (a *chatAuthenticator) Authenticate(r *http.Request) (chat.Caller, error) {
 	if err != nil {
 		return chat.Caller{}, err
 	}
-	return a.s.chatCallerWithWrites(p, r, a.namespace, a.policy, a.writes, a.autoApprove), nil
+	caller := a.s.chatCallerWithWrites(p, r, a.namespace, a.policy, a.writes, a.autoApprove)
+	if exec, ok := caller.Tools.(*chatToolExecutor); ok {
+		exec.toolTimeout = a.toolTimeout
+	}
+	return caller, nil
 }
+
+// chatToolTimeoutKey carries ChatOptions.ToolTimeout from the chat executor to
+// callCustom, which serves /mcp and chat alike.
+type chatToolTimeoutKey struct{}
 
 // ChatAdminAuthenticator returns the superuser-only authenticator an adapter
 // uses for the provider admin routes. It is exported so an adapter can pass it
@@ -444,7 +476,9 @@ type chatToolExecutor struct {
 	// policy is the chat access policy, re-evaluated before every tool so a
 	// role removed mid-turn stops the next step.
 	policy string
-	seq    atomic.Uint64
+	// toolTimeout is ChatOptions.ToolTimeout; zero leaves the /mcp bound.
+	toolTimeout time.Duration
+	seq         atomic.Uint64
 }
 
 var _ chat.ToolExecutor = (*chatToolExecutor)(nil)
@@ -748,6 +782,9 @@ func (e *chatToolExecutor) run(ctx context.Context, call writeCall, approved boo
 	if !approved && e.writeNeedsReview(ctx, call.principal, call.name) {
 		return nil, chat.ToolError{Message: "This change needs review."}
 	}
+	if e.toolTimeout > 0 {
+		ctx = context.WithValue(ctx, chatToolTimeoutKey{}, e.toolTimeout)
+	}
 	result, userErr, rpcErr := e.s.callToolWithWrites(ctx, call.principal, e.baseURL, "chat", e.writes, call.name, call.args, requestID)
 	if rpcErr != nil {
 		return nil, chat.ToolError{Message: chatRPCErrorMessage(rpcErr)}
@@ -757,6 +794,14 @@ func (e *chatToolExecutor) run(ctx context.Context, call writeCall, approved boo
 		// applied, so it can never be recorded as a plain failure.
 		if ctx.Err() != nil || userErr == customToolTimeoutMessage {
 			return nil, fmt.Errorf("%s: %w", userErr, chat.ErrOutcomeUnknown)
+		}
+		if _, unknown := result.(toolOutcomeUnknown); unknown {
+			if approved {
+				// The handler said it may have written: never a plain failure,
+				// so nobody retries a change that might already be there.
+				return nil, chat.OutcomeUnknownError{Message: userErr}
+			}
+			return nil, chat.ToolError{Message: userErr}
 		}
 		if _, refused := result.(toolRefusal); refused && approved {
 			return nil, chat.RefusedError{Message: userErr}

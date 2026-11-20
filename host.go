@@ -111,7 +111,8 @@ func (c *CollectionConfig) RuleFor(op string) RuleState {
 // AccessError is a user-safe refusal from PocketBase record access. Message
 // is what the caller sees (a missing and a hidden record look alike, so
 // existence never leaks); Kind is for the server-side audit log only:
-// "not_found", "denied", "invalid" or "refused" (see Refused).
+// "not_found", "denied", "invalid", "refused" (see Refused) or "unknown"
+// (see OutcomeUnknown).
 type AccessError struct {
 	Message string
 	Kind    string
@@ -134,6 +135,16 @@ func Invalid(msg string) error { return AccessError{Message: msg, Kind: "invalid
 // proposal goes back to pending with msg as its failure, so the user can edit
 // it and approve again instead of starting over.
 func Refused(msg string) error { return AccessError{Message: msg, Kind: "refused"} }
+
+// OutcomeUnknown reports a change that may or may not have been written: the
+// handler started writing and then lost track (a downstream call timed out, a
+// transaction's commit failed to answer). On MCP it is a tool error like
+// Invalid. When it ends an approved chat proposal, the proposal is recorded
+// as "unknown" with msg as its failure, never as a plain failure, so nobody
+// retries a change that might already be there. An unexpected error (one that
+// is not an AccessError or ToolError) still counts as a definite failure:
+// return OutcomeUnknown when the handler cannot tell.
+func OutcomeUnknown(msg string) error { return AccessError{Message: msg, Kind: "unknown"} }
 
 // UserMessage returns the caller-safe message of a ToolError or AccessError.
 func UserMessage(err error) (string, bool) {
