@@ -230,6 +230,11 @@ const (
 	// upload store, never in the transcript: a message records what the user
 	// attached and the runner resolves it again for every provider request.
 	PartAttachment = "attachment"
+	// PartContext is the page context a user message was sent with, kept
+	// when the handler's StoreContext is on. Result holds the JSON object. It
+	// is never sent to the model as part of the history: Setup decides what
+	// of it the model sees.
+	PartContext = "context"
 )
 
 // Part is one piece of message content: text, a tool invocation, its result, an

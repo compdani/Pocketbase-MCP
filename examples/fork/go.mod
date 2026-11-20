@@ -3,7 +3,7 @@ module example/fork
 go 1.27.0
 
 require (
-	github.com/compdani/pocketbase-mcp v0.0.0
+	github.com/compdani/pocketbase-mcp v0.1.6
 	github.com/compdani/pocketbase-mcp/adapters/pbpostgress v0.0.0
 	github.com/pocketbase/pocketbase v0.0.0
 )

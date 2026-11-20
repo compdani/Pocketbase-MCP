@@ -60,6 +60,12 @@ func chatProposalFrom(rec *core.Record) chat.Proposal {
 	if decided := rec.GetDateTime(chatFieldDecidedAt).Time(); !decided.IsZero() {
 		p.DecidedAt = &decided
 	}
+	if raw := chatRawJSON(rec, chatFieldWarnings); len(raw) > 0 {
+		var warnings []string
+		if err := json.Unmarshal(raw, &warnings); err == nil && len(warnings) > 0 {
+			p.Warnings = warnings
+		}
+	}
 	if raw := chatRawJSON(rec, chatFieldHunks); len(raw) > 0 {
 		var hunks []chat.HunkOutcome
 		if err := json.Unmarshal(raw, &hunks); err == nil {
@@ -148,6 +154,15 @@ func (s *ChatStore) CreateProposal(ctx context.Context, owner chat.OwnerKey, p c
 		rec.Set(chatFieldEditorRevision, "")
 		if err := chatSetJSON(rec, chatFieldHunks, nil); err != nil {
 			return err
+		}
+		if len(p.Warnings) > 0 {
+			raw, err := json.Marshal(p.Warnings)
+			if err != nil {
+				return err
+			}
+			if err := chatSetJSON(rec, chatFieldWarnings, raw); err != nil {
+				return err
+			}
 		}
 
 		// The contract's own validation decides what may be stored, so an
@@ -257,6 +272,9 @@ func (s *ChatStore) TransitionProposal(ctx context.Context, owner chat.OwnerKey,
 				return err
 			}
 		}
+		if u.ClearFailure {
+			rec.Set(chatFieldFailure, "")
+		}
 		if u.Failure != "" {
 			rec.Set(chatFieldFailure, u.Failure)
 		}
@@ -270,6 +288,9 @@ func (s *ChatStore) TransitionProposal(ctx context.Context, owner chat.OwnerKey,
 			if err := chatSetHunks(rec, u.Hunks); err != nil {
 				return err
 			}
+		}
+		if u.ClearDecided {
+			rec.Set(chatFieldDecidedAt, time.Time{})
 		}
 		if u.Decided {
 			rec.Set(chatFieldDecidedAt, ts)
@@ -309,6 +330,11 @@ func (s *ChatStore) ReviseProposal(ctx context.Context, owner chat.OwnerKey, id 
 			return err
 		}
 		rec.Set(chatFieldArgumentsHash, hash)
+		// A refusal or warning described the old arguments.
+		rec.Set(chatFieldFailure, "")
+		if err := chatSetJSON(rec, chatFieldWarnings, nil); err != nil {
+			return err
+		}
 		rec.Set(chatFieldRevision, revision+1)
 		rec.Set(chatFieldUpdatedAt, chatNow())
 		if err := tx.SaveWithContext(ctx, rec); err != nil {

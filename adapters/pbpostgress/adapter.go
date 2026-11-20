@@ -122,6 +122,10 @@ func New(app core.App, cfg pbmcp.Config) (*Server, error) {
 // existing route is the only failure this call can report today.
 func (s *Server) RegisterRoutes(r *router.Router[*core.RequestEvent]) error {
 	s.Adapter.setRouter(r)
+	if s.Config().DisableMCPEndpoint {
+		// Chat only: no MCP endpoint and no OAuth for it.
+		return s.registerChatRoutes(r)
+	}
 	for _, p := range s.Paths() {
 		for _, path := range []string{p, p + "/"} {
 			r.POST(path, s.handle)

@@ -786,3 +786,26 @@ func TestContextOverflowIsRecognized(t *testing.T) {
 		})
 	}
 }
+
+func TestParallelToolCallsOff(t *testing.T) {
+	srv, reqs := sseServer(t, event("message_stop", `{"type":"message_stop"}`))
+	off := false
+	ch, err := newProvider(t, srv.URL).Stream(context.Background(), provider.Request{
+		Model: "m", ParallelToolCalls: &off,
+		Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}},
+		Tools:    []provider.ToolDef{{Name: "lookup", InputSchema: toolSchema()}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect(t, ch)
+	var body struct {
+		ToolChoice map[string]any `json:"tool_choice"`
+	}
+	if err := json.Unmarshal(reqs()[0].body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.ToolChoice["type"] != "auto" || body.ToolChoice["disable_parallel_tool_use"] != true {
+		t.Fatalf("tool_choice = %v", body.ToolChoice)
+	}
+}

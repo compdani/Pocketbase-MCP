@@ -43,6 +43,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -92,6 +93,8 @@ const (
 	// chatFieldContextSummary holds the conversation's summary (a
 	// chat.Summary as JSON), or nothing.
 	chatFieldContextSummary = "contextSummary"
+	// chatFieldImportSource is the SourceID of an imported conversation.
+	chatFieldImportSource = "importSource"
 
 	// Proposal fields. They keep the chat.Proposal names, except that the
 	// conversation and turn bindings use their own column names so a proposal
@@ -112,6 +115,7 @@ const (
 	chatFieldResult               = "result"
 	chatFieldFailure              = "failure"
 	chatFieldEditorRevision       = "editorRevision"
+	chatFieldWarnings             = "warnings"
 	chatFieldHunks                = "hunks"
 
 	// Upload fields. The conversation binding uses its own column name so an
@@ -132,6 +136,8 @@ const (
 	chatMaxTxAttempts        = 5
 	chatInterruptedMessage   = "turn interrupted by server restart"
 	chatCollectionNameMaxLen = 100
+	// chatMaxMessagePartsBytes is the parts column's MaxSize.
+	chatMaxMessagePartsBytes = 4 << 20
 )
 
 // ChatStoreOptions configures NewChatStore.
@@ -161,6 +167,8 @@ type ChatStore struct {
 	uploads       string
 
 	maxEvents int
+	// importMu serializes ImportConversation (see there).
+	importMu sync.Mutex
 	// lastUploadMS makes consecutive upload timestamps strictly increasing.
 	// PocketBase dates keep millisecond precision, so two uploads stored within
 	// one millisecond would otherwise tie and fall back to an arbitrary id
@@ -174,6 +182,7 @@ var _ chat.UploadStore = (*ChatStore)(nil)
 var _ chat.ActiveTurnStore = (*ChatStore)(nil)
 var _ chat.RecentMessageStore = (*ChatStore)(nil)
 var _ chat.SummaryStore = (*ChatStore)(nil)
+var _ chat.ImportStore = (*ChatStore)(nil)
 
 var chatCollectionPrefixPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -289,10 +298,12 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 					&core.DateField{Name: chatFieldCreatedAt},
 					&core.DateField{Name: chatFieldUpdatedAt},
 					&core.JSONField{Name: chatFieldContextSummary, MaxSize: 512 << 10},
+					&core.TextField{Name: chatFieldImportSource},
 				)
 			},
-			// v1.4 adds the conversation summary. Older stores gain it in place.
-			addFields: []string{chatFieldContextSummary},
+			// v1.4 adds the conversation summary and the import source. Older
+			// stores gain them in place.
+			addFields: []string{chatFieldContextSummary, chatFieldImportSource},
 			indexes: []chatIndexSpec{
 				{name: "idx_" + s.conversations + "_owner_created", columns: chatFieldOwnerKey + ", " + chatFieldCreatedAt + ", id"},
 			},
@@ -305,7 +316,7 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 					&core.TextField{Name: chatFieldConversation},
 					&core.TextField{Name: chatFieldTurn},
 					&core.TextField{Name: chatFieldRole},
-					&core.JSONField{Name: chatFieldParts, MaxSize: 4 << 20},
+					&core.JSONField{Name: chatFieldParts, MaxSize: chatMaxMessagePartsBytes},
 					&core.DateField{Name: chatFieldCreatedAt},
 				}
 			},
@@ -390,8 +401,11 @@ func (s *ChatStore) specs() []chatCollectionSpec {
 					&core.JSONField{Name: chatFieldHunks, MaxSize: 256 << 10},
 					&core.DateField{Name: chatFieldCreatedAt},
 					&core.DateField{Name: chatFieldUpdatedAt},
+					&core.JSONField{Name: chatFieldWarnings, MaxSize: 64 << 10},
 				)
 			},
+			// v1.4 adds proposal warnings. Older stores gain them in place.
+			addFields: []string{chatFieldWarnings},
 			indexes: []chatIndexSpec{
 				// The per-conversation list order, and the delete cascade's
 				// scan, are both served by this index.
@@ -1610,4 +1624,95 @@ func chatSummaryFrom(rec *core.Record) (chat.Summary, bool, error) {
 		return chat.Summary{}, false, nil
 	}
 	return sum, true, nil
+}
+
+// ImportConversation implements chat.ImportStore: the conversation and its
+// messages are written in one transaction, and an owner's second import of a
+// SourceID returns the first conversation without writing anything.
+func (s *ChatStore) ImportConversation(ctx context.Context, owner chat.OwnerKey, c chat.ImportedConversation) (chat.Conversation, bool, error) {
+	if err := owner.Validate(); err != nil {
+		return chat.Conversation{}, false, err
+	}
+	// The "already imported?" check and the insert must not interleave: two
+	// tabs (or a retry after a slow answer) import the same thread at once.
+	// Imports are rare, so one lock per store is enough. It covers one
+	// process; instances sharing a database rely on imports being one-off.
+	s.importMu.Lock()
+	defer s.importMu.Unlock()
+	if err := chat.ValidateImport(&c, time.Now()); err != nil {
+		return chat.Conversation{}, false, err
+	}
+	// A message must fit this store's parts column; say which one doesn't
+	// (a 400), rather than failing the transaction (a 500).
+	for i, m := range c.Messages {
+		raw, err := json.Marshal(m.Parts)
+		if err != nil {
+			return chat.Conversation{}, false, err
+		}
+		if len(raw) > chatMaxMessagePartsBytes {
+			return chat.Conversation{}, false, fmt.Errorf("%w: message %d is %d bytes, over this store's %d-byte limit per message",
+				chat.ErrInvalidImport, i, len(raw), chatMaxMessagePartsBytes)
+		}
+	}
+	title := c.Title
+	if title == "" {
+		title = chat.ImportTitle(c)
+	}
+	var (
+		out     chat.Conversation
+		created bool
+	)
+	err := s.chatRunTx(func(tx core.App) error {
+		created = false
+		params := chatOwnerParams(owner)
+		params[chatFieldImportSource] = c.SourceID
+		if existing, err := chatFirst(tx, s.conversations,
+			chatFieldOwnerKey+" = {:ownerKey} && "+chatFieldImportSource+" = {:importSource}", params); err == nil {
+			out = chatConversationFrom(existing)
+			return nil
+		} else if !errors.Is(err, chat.ErrNotFound) {
+			return err
+		}
+		convCol, err := chatCollection(tx, s.conversations)
+		if err != nil {
+			return err
+		}
+		conv := core.NewRecord(convCol)
+		chatSetOwner(conv, owner)
+		conv.Set(chatFieldTitle, title)
+		conv.Set(chatFieldTarget, c.Target)
+		conv.Set(chatFieldCreatedAt, chatTime(c.CreatedAt))
+		conv.Set(chatFieldUpdatedAt, chatTime(c.UpdatedAt))
+		conv.Set(chatFieldImportSource, c.SourceID)
+		if err := tx.SaveWithContext(ctx, conv); err != nil {
+			return err
+		}
+		msgCol, err := chatCollection(tx, s.messages)
+		if err != nil {
+			return err
+		}
+		for _, m := range c.Messages {
+			rec := core.NewRecord(msgCol)
+			chatSetOwner(rec, owner)
+			rec.Set(chatFieldConversation, conv.Id)
+			rec.Set(chatFieldTurn, "")
+			rec.Set(chatFieldRole, m.Role)
+			raw, err := json.Marshal(m.Parts)
+			if err != nil {
+				return fmt.Errorf("chat store: marshal imported parts: %w", err)
+			}
+			chatSetJSON(rec, chatFieldParts, raw)
+			rec.Set(chatFieldCreatedAt, chatTime(m.CreatedAt))
+			if err := tx.SaveWithContext(ctx, rec); err != nil {
+				return err
+			}
+		}
+		out = chatConversationFrom(conv)
+		created = true
+		return nil
+	})
+	if err != nil {
+		return chat.Conversation{}, false, err
+	}
+	return out, created, nil
 }

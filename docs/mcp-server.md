@@ -56,9 +56,10 @@ PocketBase moved to its own host at v0.41: stock PocketBase is now
 The fork still declares the old path (`github.com/pocketbase/pocketbase`), so
 an app picks the fork with a `replace` directive in its own `go.mod`. When the
 fork is rebased onto v0.41 or later, the fork adapter and example move to the
-new path too. **Never create a `go.work` that
-includes both adapters or both examples**: one binary can't contain two
-implementations of the same module path.
+new path too. Until then the two paths differ, so the repository's `go.work`
+can include both adapters and both examples. After such a rebase it can't:
+one binary can't contain two implementations of the same module path, and the
+workspace would have to drop one of them.
 
 ## 3. Sign-in and OAuth
 
@@ -383,8 +384,10 @@ Two optional hooks cover what a schema can't:
   only. `pbmcp.ToolError` values are shown as written, since they are
   user-safe by construction.
 - Facade refusals are `AccessError` values: `not_found` (missing, hidden or
-  out of scope, all with the same message), `denied` or `invalid`. The kind
-  only feeds the audit outcome.
+  out of scope, all with the same message), `denied`, `invalid` or `refused`
+  (`pbmcp.Refused`: the change was turned down before anything was written;
+  on an approved chat proposal it returns the proposal to pending). The kind
+  feeds the audit outcome.
 - Authentication failures keep their HTTP status and headers.
 
 ### Schema subset
@@ -447,7 +450,8 @@ creates a demo user and contract.
 `Config.AuditFunc` receives one `AuditEvent` per tool call (generated and
 custom tools, MCP and chat): principal, tool, effect, collection and action,
 outcome, duration, request ID and channel. Outcomes are `ok`, `denied`,
-`invalid`, `not_found`, `error`, `timeout`, and for chat also `proposed`.
+`invalid`, `not_found`, `refused`, `error`, `timeout`, and for chat also
+`proposed`.
 
 No arguments are recorded by default. `Config.AuditIncludePayload` adds a
 redacted copy: keys naming tokens, passwords, secrets or authorization are

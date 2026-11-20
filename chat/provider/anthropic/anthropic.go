@@ -169,6 +169,13 @@ type messagesRequest struct {
 	Messages  []wireMessage `json:"messages"`
 	Tools     []wireTool    `json:"tools,omitempty"`
 	Stream    bool          `json:"stream"`
+	// ToolChoice is only sent to forbid parallel tool calls.
+	ToolChoice *toolChoice `json:"tool_choice,omitempty"`
+}
+
+type toolChoice struct {
+	Type                   string `json:"type"`
+	DisableParallelToolUse bool   `json:"disable_parallel_tool_use,omitempty"`
 }
 
 type wireMessage struct {
@@ -243,6 +250,9 @@ func (p *Provider) buildBody(req provider.Request) ([]byte, error) {
 			tools = append(tools, wireTool{Name: t.Name, Description: t.Description, InputSchema: schema})
 		}
 		payload.Tools = tools
+		if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
+			payload.ToolChoice = &toolChoice{Type: "auto", DisableParallelToolUse: true}
+		}
 	}
 
 	body, err := json.Marshal(payload)

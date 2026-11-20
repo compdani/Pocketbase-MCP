@@ -1361,7 +1361,10 @@ export class ChatController extends EventTarget {
       });
     } catch (err) {
       if (!this._current(epoch)) return null;
-      if (err instanceof ChatApiError && err.status === 409 && err.proposal) {
+      // 409: decided elsewhere or stale. 422 refused: the tool refused the
+      // approved change before writing anything, and the proposal is pending
+      // again with the reason. Either way the server's copy is the truth.
+      if (err instanceof ChatApiError && (err.status === 409 || (err.status === 422 && err.code === 'refused')) && err.proposal) {
         const adopted = this._adoptProposal(err.proposal, { code: err.code, message: err.message });
         return { proposal: adopted, replayed: false, error: { code: err.code, message: err.message } };
       }
@@ -1406,7 +1409,10 @@ export class ChatController extends EventTarget {
       });
     } catch (err) {
       if (!this._current(epoch)) return null;
-      if (err instanceof ChatApiError && err.status === 409 && err.proposal) {
+      // 409: decided elsewhere or stale. 422 refused: the tool refused the
+      // approved change before writing anything, and the proposal is pending
+      // again with the reason. Either way the server's copy is the truth.
+      if (err instanceof ChatApiError && (err.status === 409 || (err.status === 422 && err.code === 'refused')) && err.proposal) {
         const adopted = this._adoptProposal(err.proposal, { code: err.code, message: err.message });
         return { proposal: adopted, replayed: false, error: { code: err.code, message: err.message } };
       }

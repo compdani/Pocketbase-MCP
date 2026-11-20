@@ -10,6 +10,7 @@ import (
 	"ganigeorgiev.com/pocketbase/pocketbase/core"
 
 	pbmcp "github.com/compdani/pocketbase-mcp"
+	"github.com/compdani/pocketbase-mcp/chat"
 )
 
 // TestResolveCallerRunsHostHandler is the pattern a host with its own
@@ -68,6 +69,13 @@ func TestResolveCallerRefusesStaleOrForeignTokens(t *testing.T) {
 
 	if c, err := ResolveCaller(env.app, pbmcp.CallContext{Principal: principal}); err != nil || c.Record.Id != rec.Id {
 		t.Fatalf("valid caller refused: %v", err)
+	}
+	// The same check from a chat Setup hook.
+	if c, err := ResolveTurnCaller(context.Background(), env.app, chat.TurnInput{Identity: principal}); err != nil || c.Record.Id != rec.Id {
+		t.Fatalf("turn caller refused: %v", err)
+	}
+	if _, err := ResolveTurnCaller(context.Background(), env.app, chat.TurnInput{}); err == nil {
+		t.Fatal("a turn without an identity resolved")
 	}
 	cases := map[string]pbmcp.Principal{
 		"no token":      {ID: rec.Id, CollectionID: rec.Collection().Id},

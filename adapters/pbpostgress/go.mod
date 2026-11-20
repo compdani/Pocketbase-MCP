@@ -3,7 +3,7 @@ module github.com/compdani/pocketbase-mcp/adapters/pbpostgress
 go 1.27.0
 
 require (
-	github.com/compdani/pocketbase-mcp v0.0.0
+	github.com/compdani/pocketbase-mcp v0.1.6
 	github.com/pocketbase/dbx v1.12.0
 	github.com/pocketbase/pocketbase v0.0.0
 )
@@ -54,7 +54,5 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.52.0 // indirect
 )
-
-replace github.com/compdani/pocketbase-mcp => ../../
 
 replace github.com/pocketbase/pocketbase => github.com/compdani/pb-postgress v0.41.6

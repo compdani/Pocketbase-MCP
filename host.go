@@ -111,7 +111,7 @@ func (c *CollectionConfig) RuleFor(op string) RuleState {
 // AccessError is a user-safe refusal from PocketBase record access. Message
 // is what the caller sees (a missing and a hidden record look alike, so
 // existence never leaks); Kind is for the server-side audit log only:
-// "not_found", "denied" or "invalid".
+// "not_found", "denied", "invalid" or "refused" (see Refused).
 type AccessError struct {
 	Message string
 	Kind    string
@@ -127,6 +127,13 @@ func Denied(msg string) error { return AccessError{Message: msg, Kind: "denied"}
 
 // Invalid reports input that PocketBase rejected (validation).
 func Invalid(msg string) error { return AccessError{Message: msg, Kind: "invalid"} }
+
+// Refused reports a change the tool refused before writing anything, for a
+// reason the user can fix (the host's handler answered 400, say). On MCP it is
+// a tool error like Invalid. When it ends an approved chat proposal, the
+// proposal goes back to pending with msg as its failure, so the user can edit
+// it and approve again instead of starting over.
+func Refused(msg string) error { return AccessError{Message: msg, Kind: "refused"} }
 
 // UserMessage returns the caller-safe message of a ToolError or AccessError.
 func UserMessage(err error) (string, bool) {

@@ -34,6 +34,8 @@ type Error struct {
 	Code string
 	// Message is the provider's human-readable message, sanitized and bounded.
 	Message string
+	// Param is the request parameter the provider blamed, when it names one.
+	Param string
 	// Detail is the raw body when the body was not JSON in a shape we
 	// recognize, sanitized and bounded. It is empty otherwise.
 	Detail string
@@ -98,6 +100,13 @@ func (e *Error) ContextOverflow() bool {
 	return provider.LooksLikeContextOverflow(e.Code, e.Message+" "+e.Detail)
 }
 
+// FailureKind classifies the error for the turn's failure code (see
+// provider.ClassifyFailure): rejected credentials, an exhausted quota or plan
+// limit, or throttling.
+func (e *Error) FailureKind() string {
+	return provider.ClassifyFailure(e.StatusCode, e.Type+" "+e.Code, e.Message+" "+e.Detail)
+}
+
 // parseBody extracts the provider's error object from a response body. Both
 // wire formats nest it under "error", as an object or, for some gateways, as
 // a string.
@@ -138,6 +147,7 @@ func parseErrorValue(raw json.RawMessage, e *Error) bool {
 		Type    string          `json:"type"`
 		Code    json.RawMessage `json:"code"`
 		Message string          `json:"message"`
+		Param   string          `json:"param"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return false
@@ -149,6 +159,7 @@ func parseErrorValue(raw json.RawMessage, e *Error) bool {
 	if obj.Message != "" {
 		e.Message = obj.Message
 	}
+	e.Param = obj.Param
 	return e.Type != "" || e.Code != "" || e.Message != ""
 }
 
@@ -196,5 +207,6 @@ func sanitize(e *Error, secret string) {
 	e.Type = clean(e.Type)
 	e.Code = clean(e.Code)
 	e.Message = clean(e.Message)
+	e.Param = clean(e.Param)
 	e.Detail = clean(e.Detail)
 }

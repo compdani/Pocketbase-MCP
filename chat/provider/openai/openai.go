@@ -85,7 +85,18 @@ type Config struct {
 	// ExtraBody is merged into the encoded request body last. It is for
 	// non-secret gateway-specific fields.
 	ExtraBody map[string]any
+	// MaxTokensField names the Chat Completions output bound:
+	// "max_completion_tokens" (the default, which OpenAI's reasoning models
+	// require) or "max_tokens" (for older OpenAI-compatible servers). When the
+	// server refuses the field, the request is sent once more without a bound.
+	MaxTokensField string
 }
+
+// Output-bound field names for Config.MaxTokensField.
+const (
+	MaxCompletionTokensField = "max_completion_tokens"
+	MaxTokensField           = "max_tokens"
+)
 
 // Provider is an OpenAI-compatible streaming chat provider. It is safe for
 // concurrent Stream calls.
@@ -98,6 +109,7 @@ type Provider struct {
 	name        string
 	wire        string
 	extraBody   map[string]any
+	maxField    string
 }
 
 var _ provider.Provider = (*Provider)(nil)
@@ -142,7 +154,16 @@ func New(cfg Config) (*Provider, error) {
 	for k, v := range cfg.ExtraBody {
 		extra[k] = v
 	}
+	maxField := strings.TrimSpace(cfg.MaxTokensField)
+	switch maxField {
+	case "":
+		maxField = MaxCompletionTokensField
+	case MaxCompletionTokensField, MaxTokensField:
+	default:
+		return nil, fmt.Errorf("openai: unsupported max tokens field %q", cfg.MaxTokensField)
+	}
 	return &Provider{
+		maxField:    maxField,
 		baseURL:     base,
 		apiKey:      cfg.APIKey,
 		tokenSource: cfg.TokenSource,
@@ -179,12 +200,19 @@ func (p *Provider) Stream(ctx context.Context, req provider.Request) (<-chan pro
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
-	var body []byte
+	var body, unbounded []byte
 	var err error
 	if p.wire == WireResponses {
 		body, err = p.buildResponsesBody(req)
 	} else {
 		body, err = p.buildBody(req)
+		if err == nil && req.MaxOutputTokens > 0 {
+			// The same request without an output bound, for a server that
+			// refuses the bound's field.
+			loose := req
+			loose.MaxOutputTokens = 0
+			unbounded, err = p.buildBody(loose)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -197,7 +225,7 @@ func (p *Provider) Stream(ctx context.Context, req provider.Request) (<-chan pro
 	ch := make(chan provider.Chunk)
 	go func() {
 		defer close(ch)
-		p.stream(ctx, body, ch)
+		p.stream(ctx, body, unbounded, ch)
 	}()
 	return ch, nil
 }
@@ -211,6 +239,10 @@ type chatRequest struct {
 	Stream        bool           `json:"stream"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 	MaxTokens     int            `json:"max_tokens,omitempty"`
+	// MaxCompletionTokens replaces max_tokens for current OpenAI models.
+	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
+	// ParallelToolCalls is only sent with tools, when the request sets it.
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
 	// ReasoningEffort is Chat Completions' reasoning_effort for reasoning
 	// models (gpt-5, o-series).
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
@@ -286,7 +318,14 @@ func (p *Provider) buildBody(req provider.Request) ([]byte, error) {
 		ReasoningEffort: req.ReasoningEffort,
 	}
 	if req.MaxOutputTokens > 0 {
-		payload.MaxTokens = req.MaxOutputTokens
+		if p.maxField == MaxTokensField {
+			payload.MaxTokens = req.MaxOutputTokens
+		} else {
+			payload.MaxCompletionTokens = req.MaxOutputTokens
+		}
+	}
+	if len(req.Tools) > 0 && req.ParallelToolCalls != nil {
+		payload.ParallelToolCalls = req.ParallelToolCalls
 	}
 	if len(req.Tools) > 0 {
 		tools := make([]wireTool, 0, len(req.Tools))
@@ -468,11 +507,15 @@ func toolResult(raw json.RawMessage) (string, error) {
 
 // --- streaming ---
 
-func (p *Provider) stream(ctx context.Context, body []byte, ch chan<- provider.Chunk) {
-	for attempt := 0; ; attempt++ {
-		token, err := p.requestToken(ctx, attempt > 0)
+func (p *Provider) stream(ctx context.Context, body, unbounded []byte, ch chan<- provider.Chunk) {
+	// The two retries are independent: a 401 forces one token refresh, and a
+	// refused output bound resends once without it (with the same token).
+	refreshToken, refreshed := false, false
+	for {
+		token, err := p.requestToken(ctx, refreshToken)
+		refreshToken = false
 		if err != nil {
-			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf("openai: token: %w", err)})
+			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: &provider.AuthError{Err: fmt.Errorf("openai: token: %w", err)}})
 			return
 		}
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint(), bytes.NewReader(body))
@@ -498,18 +541,26 @@ func (p *Provider) stream(ctx context.Context, body []byte, ch chan<- provider.C
 			return
 		}
 
-		if resp.StatusCode == http.StatusUnauthorized && p.tokenSource != nil && attempt == 0 {
+		if resp.StatusCode == http.StatusUnauthorized && p.tokenSource != nil && !refreshed {
 			// A stale access token is expected for the plan route. Force one
 			// refresh and retry the same body; anything else is a real error.
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
 			resp.Body.Close()
+			refreshToken, refreshed = true, true
 			continue
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode > 299 {
 			detail, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 			resp.Body.Close()
-			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: httperr.New(p.name, resp.StatusCode, detail, token)})
+			herr := httperr.New(p.name, resp.StatusCode, detail, token)
+			if unbounded != nil && refusesOutputBound(herr) {
+				// A server that doesn't know the bound's field: send the same
+				// request once more without it.
+				body, unbounded = unbounded, nil
+				continue
+			}
+			sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: herr})
 			return
 		}
 
@@ -567,6 +618,12 @@ func (p *Provider) consume(ctx context.Context, body io.Reader, ch chan<- provid
 				args = "{}"
 			}
 			if !json.Valid([]byte(args)) {
+				if stopReason == "length" {
+					// The output limit cut the call short: report the limit
+					// (output_limit), not a malformed call.
+					sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkDone, StopReason: stopReason})
+					return false
+				}
 				sendChunk(ctx, ch, provider.Chunk{Kind: provider.ChunkError, Err: fmt.Errorf(
 					"openai: tool call %q has invalid JSON arguments: %s", a.name, truncate(args))})
 				return false
@@ -730,4 +787,25 @@ func truncate(s string) string {
 		return s
 	}
 	return s[:max] + "…"
+}
+
+// refusesOutputBound reports a 400 that names the output-bound field, such as
+// "Unsupported parameter: 'max_tokens'" from a reasoning model or "Unrecognized
+// request argument supplied: max_completion_tokens" from an older server.
+func refusesOutputBound(e *httperr.Error) bool {
+	if e.StatusCode != http.StatusBadRequest || e.ContextOverflow() {
+		return false
+	}
+	text := strings.ToLower(e.Code + " " + e.Param + " " + e.Message + " " + e.Detail)
+	if !strings.Contains(text, MaxCompletionTokensField) && !strings.Contains(text, MaxTokensField) {
+		return false
+	}
+	// Only a refusal of the field itself, never a bad value ("max_tokens
+	// must be greater than 0"), which would silently drop the bound.
+	for _, word := range []string{"unsupported", "unrecognized", "unknown", "not supported", "not allowed", "not permitted", "extra"} {
+		if strings.Contains(text, word) {
+			return true
+		}
+	}
+	return false
 }

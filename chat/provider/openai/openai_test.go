@@ -157,7 +157,7 @@ func TestRequestShapeAndTextStreaming(t *testing.T) {
 		StreamOptions *struct {
 			IncludeUsage bool `json:"include_usage"`
 		} `json:"stream_options"`
-		MaxTokens int `json:"max_tokens"`
+		MaxTokens int `json:"max_completion_tokens"`
 		Messages  []struct {
 			Role       string          `json:"role"`
 			Content    json.RawMessage `json:"content"`
@@ -671,5 +671,173 @@ func TestContextOverflowIsRecognized(t *testing.T) {
 	}
 	if got := collect(t, ch); len(got) != 1 || provider.IsContextOverflow(got[0].Err) {
 		t.Fatalf("an overloaded stream was classified as an overflow: %+v", got)
+	}
+}
+
+func TestOutputBoundRefusedIsRetriedWithout(t *testing.T) {
+	var bodies []map[string]any
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		mu.Lock()
+		bodies = append(bodies, body)
+		n := len(bodies)
+		mu.Unlock()
+		if n == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"Unrecognized request argument supplied: max_completion_tokens","type":"invalid_request_error"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	ch, err := newProvider(t, srv.URL).Stream(context.Background(), provider.Request{
+		Model: "m", MaxOutputTokens: 128000, Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collect(t, ch)
+	if last := got[len(got)-1]; last.Kind != provider.ChunkDone {
+		t.Fatalf("chunks = %+v, want a successful retry", got)
+	}
+	if len(bodies) != 2 || bodies[0]["max_completion_tokens"] != float64(128000) {
+		t.Fatalf("bodies = %v", bodies)
+	}
+	if _, ok := bodies[1]["max_completion_tokens"]; ok {
+		t.Fatalf("the retry still sent a bound: %v", bodies[1])
+	}
+}
+
+func TestMaxTokensFieldAndParallelToolCalls(t *testing.T) {
+	srv, reqs := sseServer(t, `{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`, "[DONE]")
+	p, err := New(Config{BaseURL: srv.URL, MaxTokensField: MaxTokensField})
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := false
+	ch, err := p.Stream(context.Background(), provider.Request{
+		Model: "m", MaxOutputTokens: 64, ParallelToolCalls: &off,
+		Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}},
+		Tools:    []provider.ToolDef{{Name: "lookup", InputSchema: toolSchema()}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect(t, ch)
+	var body map[string]any
+	if err := json.Unmarshal(reqs()[0].body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["max_tokens"] != float64(64) || body["max_completion_tokens"] != nil || body["parallel_tool_calls"] != false {
+		t.Fatalf("body = %v", body)
+	}
+	if _, err := New(Config{MaxTokensField: "max_output"}); err == nil {
+		t.Fatal("an unknown field name was accepted")
+	}
+}
+
+func TestOutputBoundRetryKeepsTheAuthRetry(t *testing.T) {
+	var auths []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		auths = append(auths, r.Header.Get("Authorization"))
+		mu.Unlock()
+		switch {
+		case strings.Contains(string(raw), "max_completion_tokens"):
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"Unsupported parameter: 'max_completion_tokens'","type":"invalid_request_error"}}`)
+		case r.Header.Get("Authorization") != "Bearer fresh":
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		}
+	}))
+	defer srv.Close()
+	tokens := &stubTokens{}
+	p, err := New(Config{BaseURL: srv.URL, TokenSource: tokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := p.Stream(context.Background(), provider.Request{Model: "m", MaxOutputTokens: 64, Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collect(t, ch)
+	if got[len(got)-1].Kind != provider.ChunkDone {
+		t.Fatalf("chunks = %+v", got)
+	}
+	// Bound refused (no refresh), then a 401 still gets its one refresh.
+	if len(auths) != 3 || auths[0] != "Bearer stale" || auths[1] != "Bearer stale" || auths[2] != "Bearer fresh" {
+		t.Fatalf("authorizations = %v", auths)
+	}
+}
+
+func TestOutputBoundValueErrorIsNotRetried(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"max_completion_tokens must be greater than 0","type":"invalid_request_error"}}`)
+	}))
+	defer srv.Close()
+	ch, err := newProvider(t, srv.URL).Stream(context.Background(), provider.Request{Model: "m", MaxOutputTokens: 64, Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect(t, ch)
+	if calls != 1 {
+		t.Fatalf("calls = %d: a bad value dropped the bound", calls)
+	}
+}
+
+type stubTokens struct{ mu sync.Mutex }
+
+func (s *stubTokens) Token(_ context.Context, force bool) (string, error) {
+	if force {
+		return "fresh", nil
+	}
+	return "stale", nil
+}
+
+func TestOutputBoundRefusalNamedOnlyInParam(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"Unsupported parameter","param":"max_completion_tokens","type":"invalid_request_error"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	ch, err := newProvider(t, srv.URL).Stream(context.Background(), provider.Request{Model: "m", MaxOutputTokens: 64, Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := collect(t, ch); got[len(got)-1].Kind != provider.ChunkDone || calls != 2 {
+		t.Fatalf("calls = %d chunks = %+v", calls, got)
+	}
+}
+
+func TestTruncatedToolCallReportsTheLimit(t *testing.T) {
+	srv, _ := sseServer(t,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"write","arguments":"{\"text\":\"abc"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"length"}]}`, "[DONE]")
+	ch, err := newProvider(t, srv.URL).Stream(context.Background(), provider.Request{Model: "m", Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collect(t, ch)
+	if last := got[len(got)-1]; last.Kind != provider.ChunkDone || last.StopReason != "length" {
+		t.Fatalf("chunks = %+v, want done with length", got)
 	}
 }

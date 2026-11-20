@@ -523,3 +523,22 @@ func TestRunnerSmallWindowReportsHeldTokens(t *testing.T) {
 		t.Fatalf("status = %+v: a conversation that no longer fits must report more than the window", status)
 	}
 }
+
+// A result the model asked for in this turn reaches it whole when it fits,
+// even when it is over MaxToolResultTokens; only an over-full history cuts it.
+func TestBuildHistoryKeepsTheCurrentTurnsResultWhole(t *testing.T) {
+	schema := strings.Repeat("workflow schema field ", 3000) // ~19k tokens
+	msgs := []Message{
+		userMsg("u1", "build a workflow"),
+		assistantCall("a1", "c1", "workflow_schema"),
+		toolResult("t1", "c1", "workflow_schema", schema),
+	}
+	whole := buildHistory(historyPlan{msgs: msgs, budget: historyBudget{tokens: 100_000}})
+	if whole.truncated != 0 || !strings.Contains(string(whole.messages[len(whole.messages)-1].ToolResult), schema[:2000]) {
+		t.Fatalf("the current turn's result was cut although it fits: truncated=%d", whole.truncated)
+	}
+	tight := buildHistory(historyPlan{msgs: msgs, budget: historyBudget{tokens: 9_000}})
+	if tight.truncated != 1 {
+		t.Fatalf("an over-full history kept the huge result whole: truncated=%d", tight.truncated)
+	}
+}

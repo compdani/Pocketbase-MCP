@@ -109,8 +109,10 @@ func (l ProposalLocation) Valid() bool {
 // client, and an editor proposal never executes on the server.
 var proposalTransitions = map[ProposalLocation]map[ProposalState][]ProposalState{
 	ProposalLocationServer: {
-		ProposalStatePending:   {ProposalStateExecuting, ProposalStateRejected, ProposalStateExpired},
-		ProposalStateExecuting: {ProposalStateSucceeded, ProposalStateFailed, ProposalStateUnknown},
+		ProposalStatePending: {ProposalStateExecuting, ProposalStateRejected, ProposalStateExpired},
+		// Executing -> pending is the RefusedError path: the tool refused before
+		// writing anything, so the user may fix the change and approve again.
+		ProposalStateExecuting: {ProposalStateSucceeded, ProposalStateFailed, ProposalStateUnknown, ProposalStatePending},
 	},
 	ProposalLocationEditor: {
 		ProposalStatePending:  {ProposalStateApproved, ProposalStateRejected, ProposalStateExpired},
@@ -177,6 +179,10 @@ type Proposal struct {
 	// Hunks carries per-hunk editor outcomes when partial application is
 	// supported.
 	Hunks []HunkOutcome `json:"hunks,omitempty"`
+	// Warnings are the host's notes about the proposed change (ToolSpec.Warn),
+	// shown on the review card and sent to the model with the pending result.
+	// They never block the change.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Validate reports whether p carries the fields every store and client needs:
@@ -227,6 +233,8 @@ type ProposalDraft struct {
 	Target           string
 	Arguments        json.RawMessage
 	Summary          string
+	// Warnings are stored on the proposal (see Proposal.Warnings).
+	Warnings []string
 	// OnStored, when set, runs once the proposal is stored, so side records
 	// such as audit lines only exist for proposals that do.
 	OnStored func(Proposal)
@@ -244,6 +252,12 @@ type ProposalUpdate struct {
 	// ExpiresAt, when non-zero, replaces the deadline. Approving an editor
 	// proposal uses it to give the browser a full TTL to report its outcome.
 	ExpiresAt time.Time
+	// ClearFailure empties Failure before Failure is applied, so an outcome
+	// doesn't keep the message of an earlier refusal.
+	ClearFailure bool
+	// ClearDecided empties DecidedAt: a refused approval puts the proposal
+	// back to pending, undecided.
+	ClearDecided bool
 }
 
 // HashArguments returns the canonical form of a proposal's arguments and the

@@ -4,7 +4,7 @@ go 1.27
 
 require (
 	ganigeorgiev.com/pocketbase/pocketbase v0.41.1
-	github.com/compdani/pocketbase-mcp v0.0.0
+	github.com/compdani/pocketbase-mcp v0.1.6
 )
 
 require (
@@ -38,5 +38,3 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 	modernc.org/sqlite v1.60.1 // indirect
 )
-
-replace github.com/compdani/pocketbase-mcp => ../../

@@ -161,13 +161,17 @@ type historyUnit struct {
 //
 // Otherwise it shrinks, in order, until the estimate fits:
 //
-//  1. every tool result is cut to maxToolResultTokens;
+//  1. tool results from earlier turns are cut to maxToolResultTokens;
 //  2. tool results outside the last keepFullToolTurns user turns become short
 //     stubs, largest first;
 //  3. attachments outside the current turn are dropped, oldest first;
 //  4. whole units are dropped, oldest first, except the current turn and
 //     pinned units (a proposal still awaiting its decision);
-//  5. tool results of the current turn's earlier steps become stubs.
+//  5. tool results of the current turn's earlier steps become stubs;
+//  6. the current turn's remaining results are cut to maxToolResultTokens.
+//
+// A result the model asked for in this turn therefore reaches it whole (a
+// schema it must read in full, say) unless nothing else is left to remove.
 //
 // If it still doesn't fit, the history is sent anyway: the estimate errs on
 // the high side, and a real overflow is caught by the provider and retried.
@@ -214,18 +218,28 @@ func buildHistory(plan historyPlan) historyResult {
 		return res.tokens <= b.tokens
 	}
 
-	// 1. Bound every tool result.
-	for i := range msgs {
-		for k, p := range msgs[i].Parts {
-			if p.Type != PartToolResult {
+	// truncateResults cuts the tool results of the units for which pick is true.
+	truncateResults := func(pick func(historyUnit) bool) {
+		for _, u := range units {
+			if !pick(u) {
 				continue
 			}
-			if cut, ok := truncateToolResult(p.Result, b.maxToolResultTokens); ok {
-				msgs[i].Parts[k].Result = cut
-				res.truncated++
+			for i := u.start; i < u.end; i++ {
+				for k, p := range msgs[i].Parts {
+					if p.Type != PartToolResult {
+						continue
+					}
+					if cut, ok := truncateToolResult(p.Result, b.maxToolResultTokens); ok {
+						msgs[i].Parts[k].Result = cut
+						res.truncated++
+					}
+				}
 			}
 		}
 	}
+
+	// 1. Bound the tool results of earlier turns.
+	truncateResults(func(u historyUnit) bool { return u.turnsAgo > 0 })
 	ok := fits()
 	res.fullTokens = res.tokens
 	if ok {
@@ -314,6 +328,12 @@ func buildHistory(plan historyPlan) historyResult {
 			}
 		}
 	}
+	if fits() {
+		return res
+	}
+
+	// 6. Last resort: bound the current turn's results too.
+	truncateResults(func(u historyUnit) bool { return u.turnsAgo == 0 })
 	fits()
 	return res
 }

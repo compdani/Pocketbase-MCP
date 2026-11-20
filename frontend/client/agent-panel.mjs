@@ -64,6 +64,11 @@ const ERROR_TEXT = Object.freeze({
   max_steps: 'This question needed too many steps. Try asking something narrower.',
   context_too_long: 'This conversation is too long for the selected model. Compact it, start a new chat, or pick a model with a larger context.',
   too_soon: 'The conversation was summarized moments ago.',
+  output_limit: 'The reply was cut off at the model\'s output limit. Ask for a shorter answer, or raise the limit.',
+  content_filtered: 'The AI provider withheld this reply. Try rephrasing the request.',
+  empty_reply: 'The assistant returned an empty reply. Try again.',
+  provider_auth: 'The AI provider rejected its credentials. Ask an administrator to check the key or sign in again in the provider settings.',
+  usage_limit: 'The AI provider\'s usage limit was reached. Wait a while or switch to another model.',
   internal_error: 'Something went wrong on the server. Try again.',
   timeout: 'The server took too long to answer. Try again.',
   interrupted: 'The reply was interrupted. Try again.',
@@ -318,6 +323,15 @@ export function proposalErrorText(error) {
       return 'This change expired before it was decided.';
     case 'conflict':
       return 'This change was decided somewhere else. Review the latest version.';
+    case 'refused':
+      // The tool's own reason, written for the user, and the change is
+      // waiting for approval again.
+      // Nothing was saved and the change is waiting again: it can be
+      // rejected, or approved once the cause is fixed (or the arguments
+      // edited, where the server allows it).
+      return typeof error.message === 'string' && error.message.trim() !== ''
+        ? `${error.message.trim()} Nothing was saved; the change is waiting for your decision again.`
+        : 'The change was refused before anything was saved. It is waiting for your decision again.';
     case 'not_found':
       return 'This change is no longer available.';
     case 'editor_unavailable':
@@ -368,6 +382,9 @@ export function proposalEntryOf(proposal) {
     error: proposalErrorText(proposal.error),
     status,
     detail: failure,
+    warnings: Array.isArray(proposal.warnings)
+      ? proposal.warnings.filter((w) => typeof w === 'string' && w.trim() !== '').map((w) => w.trim())
+      : [],
     canDecide: state === 'pending',
   };
 }
@@ -669,6 +686,13 @@ export function renderProposalEntry(entry, panel) {
     detail.style.cssText = 'font-size:12px;color:var(--agent-muted);margin:6px 0 0;';
     card.appendChild(detail);
   }
+  for (const warning of Array.isArray(entry.warnings) ? entry.warnings : []) {
+    const line = makeElement('p', 'proposal-warning tone-warning', warning);
+    line.setAttribute('part', 'proposal-warning');
+    line.style.cssText = 'font-size:12px;margin:6px 0 0;padding:4px 8px;border-radius:6px;'
+      + 'overflow-wrap:anywhere;';
+    card.appendChild(line);
+  }
 
   if (entry.error) {
     const line = makeElement('p', 'alert tone-error', entry.error);
@@ -706,8 +730,10 @@ export function renderNoticeEntry(entry) {
   const line = makeElement('div', 'notice', entry.content);
   line.setAttribute('part', 'notice');
   line.dataset.state = String(entry.state ?? '');
+  // A notice can carry a long URL or identifier: let it wrap anywhere rather
+  // than overflow a narrow panel.
   line.style.cssText = 'font-size:12px;color:var(--agent-muted);text-align:center;'
-    + 'line-height:1.45;padding:2px 10px;';
+    + 'line-height:1.45;padding:2px 10px;overflow-wrap:anywhere;';
   if (entry.isError) line.style.color = 'var(--agent-error)';
   return line;
 }

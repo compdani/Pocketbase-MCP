@@ -742,6 +742,14 @@ func TestChatAuthenticator(t *testing.T) {
 	if caller.Owner.Namespace != "tests" || caller.Owner.Mount != "/mcp" || caller.Owner.AuthCollectionID != "col_users" || caller.Owner.UserID != "u1" {
 		t.Fatalf("owner = %+v", caller.Owner)
 	}
+	// Setup can see who the caller is (TurnInput.Identity).
+	p, ok := TurnPrincipal(chat.TurnInput{Identity: caller.Identity})
+	if !ok || p.ID != "u1" || p.Token != token {
+		t.Fatalf("TurnPrincipal = %+v ok=%v", p, ok)
+	}
+	if _, ok := TurnPrincipal(chat.TurnInput{}); ok {
+		t.Fatal("a turn without an identity has a principal")
+	}
 }
 
 func toolCallStep(call provider.ToolCall) scripted.Step {

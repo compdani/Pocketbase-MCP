@@ -30,6 +30,58 @@ type TurnInput struct {
 	// ContextWindow is the resolved model's input window in tokens, or 0
 	// when it is unknown.
 	ContextWindow int
+	// Identity is the authenticated caller as the host's authenticator
+	// described it (Caller.Identity); with the bundled authenticator it is a
+	// pbmcp.Principal, and the adapters' ResolveTurnCaller turns it into a
+	// signed-in user. Use it to read what the context names as the caller.
+	// It lives only for this submission: never store or log it.
+	Identity any
+	// EarlierContexts are the contexts of the conversation's earlier user
+	// messages, oldest first, when the handler stores them (StoreContext):
+	// at most MaxEarlierContexts, from the last messages the runner reads.
+	// They came from the browser like Context, so treat them the same way.
+	EarlierContexts []json.RawMessage
+}
+
+// MaxEarlierContexts bounds TurnInput.EarlierContexts.
+const MaxEarlierContexts = 30
+
+// earlierContexts reads the stored contexts of a conversation's earlier user
+// messages, oldest first. A read error leaves them out: Setup still runs with
+// this turn's context.
+func (r *Runner) earlierContexts(ctx context.Context, owner OwnerKey, conversationID string, enabled bool) []json.RawMessage {
+	if !enabled {
+		return nil
+	}
+	limit := r.cfg.MaxHistoryMessages
+	if !r.historyExplicit {
+		limit = windowedMaxHistoryMessages
+	}
+	msgs, err := r.recentMessages(ctx, owner, conversationID, limit)
+	if err != nil {
+		return nil
+	}
+	var out []json.RawMessage
+	for _, m := range msgs {
+		if m.Role != RoleUser {
+			continue
+		}
+		for _, p := range m.Parts {
+			if p.Type == PartContext && len(p.Result) > 0 {
+				out = append(out, cloneRaw(p.Result))
+			}
+		}
+	}
+	if len(out) > MaxEarlierContexts {
+		out = out[len(out)-MaxEarlierContexts:]
+	}
+	return out
+}
+
+// hasContextObject reports a non-empty JSON object.
+func hasContextObject(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed != "" && trimmed != "null" && trimmed != "{}"
 }
 
 // TurnSetup is a host's settings for one turn. Zero fields keep the runner's
@@ -49,6 +101,12 @@ type TurnSetup struct {
 	// ContextWindow replaces the model's context window for this turn, for
 	// example a smaller one a gateway enforces.
 	ContextWindow int
+	// ParallelToolCalls replaces RunnerConfig.ParallelToolCalls for this turn.
+	ParallelToolCalls *bool
+	// Tools, when set, narrows the caller's tools for this turn: a tool is
+	// offered (and may be called) only when Tools(name) is true. It can only
+	// hide tools the caller already has, never add one.
+	Tools func(name string) bool
 }
 
 // TurnRefusedError is a Setup refusal whose message is safe to show the user.
@@ -98,6 +156,8 @@ type turnSettings struct {
 	maxOutputTokens    int
 	maxHistoryMessages int
 	contextWindow      int
+	parallelToolCalls  *bool
+	tools              func(name string) bool
 }
 
 // settingsFor runs the Setup hook, if any, and fills every unset value from
@@ -123,6 +183,8 @@ func (r *Runner) settingsFor(ctx context.Context, in TurnInput) (turnSettings, e
 		maxOutputTokens:    setup.MaxOutputTokens,
 		maxHistoryMessages: setup.MaxHistoryMessages,
 		contextWindow:      setup.ContextWindow,
+		parallelToolCalls:  setup.ParallelToolCalls,
+		tools:              setup.Tools,
 	}
 	if strings.TrimSpace(s.system) == "" {
 		s.system = r.cfg.System
@@ -144,6 +206,9 @@ func (r *Runner) settingsFor(ctx context.Context, in TurnInput) (turnSettings, e
 	}
 	if s.contextWindow <= 0 {
 		s.contextWindow = in.ContextWindow
+	}
+	if s.parallelToolCalls == nil {
+		s.parallelToolCalls = r.cfg.ParallelToolCalls
 	}
 	if s.maxHistoryMessages <= 0 {
 		s.maxHistoryMessages = r.cfg.MaxHistoryMessages

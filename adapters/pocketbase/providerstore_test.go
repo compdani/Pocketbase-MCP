@@ -194,3 +194,21 @@ func TestProviderStoreRequiresEncryptionKey(t *testing.T) {
 		t.Fatalf("save without key = %v", err)
 	}
 }
+
+func TestProviderStoreKeepsMaxTokensField(t *testing.T) {
+	app := newProviderTestApp(t)
+	scope := catalog.Scope{Namespace: "ns", Mount: "/mcp"}
+	store, err := NewProviderStore(app, ProviderStoreOptions{Scope: scope})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := providerFixture("gateway")
+	p.MaxTokensField = "max_tokens"
+	if err := store.SaveProvider(context.Background(), scope, p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetProvider(context.Background(), scope, "gateway")
+	if err != nil || got.MaxTokensField != "max_tokens" {
+		t.Fatalf("MaxTokensField = %q err = %v", got.MaxTokensField, err)
+	}
+}

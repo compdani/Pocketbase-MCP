@@ -570,3 +570,28 @@ func TestChatUniqueViolationDetector(t *testing.T) {
 		t.Fatal("nil error treated as unique")
 	}
 }
+
+// An import message over the parts column's limit is a 400-class import
+// error naming the message, not a failed transaction.
+func TestChatStoreImportRefusesOversizedMessage(t *testing.T) {
+	app := newChatTestApp(t)
+	store, err := NewChatStore(app, ChatStoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chat.OwnerKey{Namespace: "ns", Mount: "/mcp", AuthCollectionID: "users", UserID: "u1"}
+	big := strings.Repeat("x", 900<<10)
+	parts := make([]chat.Part, 5)
+	for i := range parts {
+		parts[i] = chat.Part{Type: chat.PartText, Text: big}
+	}
+	_, _, err = store.ImportConversation(context.Background(), owner, chat.ImportedConversation{
+		SourceID: "big", Messages: []chat.Message{{Role: chat.RoleAssistant, Parts: parts}},
+	})
+	if !errors.Is(err, chat.ErrInvalidImport) || !strings.Contains(err.Error(), "message 0") {
+		t.Fatalf("err = %v, want ErrInvalidImport naming message 0", err)
+	}
+	if list, _, _ := store.ListConversations(context.Background(), owner, "", chat.Page{}); len(list) != 0 {
+		t.Fatalf("a refused import left %d conversations", len(list))
+	}
+}

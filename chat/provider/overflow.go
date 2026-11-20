@@ -61,3 +61,62 @@ func LooksLikeContextOverflow(code, message string) bool {
 	}
 	return false
 }
+
+// Failure kinds a provider error can report through FailureKind. They are the
+// chat failure codes a turn records, so a client can show a specific message.
+const (
+	// KindAuth: the provider rejected the credentials (a wrong or revoked
+	// key, an expired plan sign-in).
+	KindAuth = "provider_auth"
+	// KindUsageLimit: the account ran out of quota or hit its plan's usage
+	// limit; waiting or switching models helps, retrying at once doesn't.
+	KindUsageLimit = "usage_limit"
+	// KindRateLimited: too many requests for now.
+	KindRateLimited = "rate_limited"
+)
+
+// FailureKindError is implemented by a provider error that knows which kind
+// of failure it is.
+type FailureKindError interface {
+	error
+	FailureKind() string
+}
+
+// FailureKind returns the kind of a provider error (KindAuth, KindUsageLimit,
+// KindRateLimited), or "" when it is none of them.
+func FailureKind(err error) string {
+	var kinded FailureKindError
+	if errors.As(err, &kinded) {
+		return kinded.FailureKind()
+	}
+	return ""
+}
+
+// ClassifyFailure maps an HTTP status, error code and message to a failure
+// kind. Adapters use it for HTTP errors and for errors reported inside a
+// stream (status 0).
+func ClassifyFailure(status int, code, message string) string {
+	text := strings.ToLower(code + " " + message)
+	for _, needle := range []string{"insufficient_quota", "usage_limit", "quota", "billing", "credit balance", "usage limit"} {
+		if strings.Contains(text, needle) {
+			return KindUsageLimit
+		}
+	}
+	switch {
+	case status == 401 || status == 403 || strings.Contains(text, "invalid_api_key") || strings.Contains(text, "authentication_error"):
+		return KindAuth
+	case status == 402:
+		return KindUsageLimit
+	case status == 429 || strings.Contains(text, "rate_limit"):
+		return KindRateLimited
+	}
+	return ""
+}
+
+// AuthError marks a failure to obtain credentials (for example a plan
+// sign-in that can no longer be refreshed) as KindAuth.
+type AuthError struct{ Err error }
+
+func (e *AuthError) Error() string       { return e.Err.Error() }
+func (e *AuthError) Unwrap() error       { return e.Err }
+func (e *AuthError) FailureKind() string { return KindAuth }

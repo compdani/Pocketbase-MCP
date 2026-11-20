@@ -263,3 +263,32 @@ func TestResponsesFailedContextOverflow(t *testing.T) {
 		t.Fatalf("failure = %v, want a context overflow", failure)
 	}
 }
+
+func TestResponsesIncompleteReasonsAreStops(t *testing.T) {
+	for _, tc := range []struct{ frame, want string }{
+		{`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`, "max_output_tokens"},
+		{`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}}}`, "content_filter"},
+		{`{"type":"response.completed","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`, "max_output_tokens"},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, "data: "+tc.frame+"\n\n")
+		}))
+		p, err := New(Config{BaseURL: srv.URL, WireAPI: WireResponses})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ch, err := p.Stream(context.Background(), provider.Request{Model: "m", Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var last provider.Chunk
+		for c := range ch {
+			last = c
+		}
+		srv.Close()
+		if last.Kind != provider.ChunkDone || last.StopReason != tc.want {
+			t.Fatalf("%s: last chunk = %+v, want done with %q", tc.frame, last, tc.want)
+		}
+	}
+}

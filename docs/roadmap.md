@@ -24,6 +24,25 @@ migrations.
 
 ## Next
 
+- **List Pocket migration: module side done (2026-11-19).** The blockers from
+  List Pocket's migration review are in the module, with tests:
+  - releasable submodules (`go.work` for development, `scripts/release-tags.sh`;
+    see [operations.md](operations.md#releasing));
+  - host-owned provider settings and ChatGPT tokens (`ProviderStore` without
+    `ManageProviders`, `ChatRouter().Reload`, `catalog.CodexTokenStore`);
+  - per-turn tool filtering, the caller in `Setup` (`ResolveTurnCaller`),
+    stored contexts (`StoreContext`, `EarlierContexts`);
+  - proposal `Warn`, `Prepare` and `Refused` (back to pending);
+  - `max_completion_tokens` with a retry, truncated, filtered and empty replies
+    failing the turn, actionable provider failures, `ParallelToolCalls`;
+  - history import (store and browser), `first-message` titles,
+    `AcceptOtherImages`, `DisableMCPEndpoint`; the current turn's tool results
+    are no longer cut to `MaxToolResultTokens` unless nothing else fits.
+
+  Still for List Pocket's own repo: the tool port, the `Setup` hook, its
+  `catalog.Store`, the frontend and the parity suite. Release v0.1.6 with the
+  submodule tags first.
+
 - **Chat v1.4: context window management** is implemented and tested:
   token-budget history, overflow retry, background and manual summaries, and
   the context ring with Compact. See [context-window-plan.md](context-window-plan.md)
@@ -77,10 +96,10 @@ What List Pocket still needs from this module, after the work above:
   an existing app session.
 - **A stdio entry point** (a small CLI that talks to `/mcp`), so existing
   stdio client setups such as `listpocket-mcp` keep working.
-- **History import** for conversations kept in the browser today.
-- **Shared provider settings:** a `catalog.Store` backed by the app's own AI
-  settings, so it doesn't keep two keys and two ChatGPT sign-ins.
-  `ChatConfig.ProviderStore` is the hook; no example exists yet.
+- **An example of a host-owned catalog** (`ChatConfig.ProviderStore` with a
+  `catalog.CodexTokenStore`): the module side is done, but no example shows
+  it yet. History import is done (`chat.ImportConversation`, `POST
+  /conversations/actions/import`).
 
 Move one screen each in List Pocket, Event Pocket and Static Dealmakers onto
 the chat module, as separate work. Keep each app's permission policy,

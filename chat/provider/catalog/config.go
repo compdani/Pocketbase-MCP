@@ -13,6 +13,7 @@ import (
 	"github.com/compdani/pocketbase-mcp/chat"
 	"github.com/compdani/pocketbase-mcp/chat/provider"
 	"github.com/compdani/pocketbase-mcp/chat/provider/codex"
+	"github.com/compdani/pocketbase-mcp/chat/provider/openai"
 )
 
 // Kind is a built-in provider protocol.
@@ -82,7 +83,12 @@ type Provider struct {
 	DefaultModel string
 	Headers      map[string]string
 	ExtraBody    map[string]any
-	APIKey       string
+	// MaxTokensField names an openai provider's Chat Completions output
+	// bound: "" or "max_completion_tokens" (the default), or "max_tokens" for
+	// older OpenAI-compatible servers (openai.Config.MaxTokensField). Static
+	// and host-owned catalogs set it; the managed settings API doesn't yet.
+	MaxTokensField string `json:",omitempty"`
+	APIKey         string
 	// SecretError is a runtime-only note set by a store when a stored secret
 	// cannot be decrypted. It keeps one broken provider from taking the whole
 	// catalog down; the admin view asks for re-entry.
@@ -147,6 +153,14 @@ func (p Provider) Validate() error {
 		if p.Kind == KindCodex && strings.EqualFold(name, "Authorization") {
 			return fmt.Errorf("provider %q: codex providers set Authorization from the signed-in plan, not from a header", p.ID)
 		}
+	}
+	switch p.MaxTokensField {
+	case "", openai.MaxCompletionTokensField, openai.MaxTokensField:
+	default:
+		return fmt.Errorf("provider %q: max tokens field must be %q or %q", p.ID, openai.MaxCompletionTokensField, openai.MaxTokensField)
+	}
+	if p.MaxTokensField != "" && (p.Kind != KindOpenAI || p.WireAPI == openai.WireResponses) {
+		return fmt.Errorf("provider %q: a max tokens field only applies to openai providers on Chat Completions", p.ID)
 	}
 	if p.Kind == KindAnthropic && len(p.ExtraBody) > 0 {
 		return fmt.Errorf("provider %q: extra body is not supported by the Anthropic adapter", p.ID)
@@ -275,6 +289,32 @@ type Store interface {
 	SaveSetting(ctx context.Context, scope Scope, key string, value any) error
 	// HostID returns the install's stable ext_agent_host_id, creating it once.
 	HostID(ctx context.Context, scope Scope) (string, error)
+}
+
+// CodexTokenStore is implemented by a Store whose host owns the ChatGPT plan
+// sign-in (its own settings page, its own token refresh). For a codex provider
+// the router then asks the host for each request's token instead of running
+// its own sign-in and refresh, so there is only one refresher: two would
+// rotate the refresh token under each other. The store's credential methods
+// are not used for such a provider, and the admin sign-in routes don't apply.
+type CodexTokenStore interface {
+	// CodexToken returns a current access token for the provider. forceRefresh
+	// is true after the provider answered 401 with the previous token.
+	CodexToken(ctx context.Context, scope Scope, providerID string, forceRefresh bool) (string, error)
+	// CodexSignedIn reports whether the host has a usable plan sign-in for
+	// the provider. A provider without one is left out of the choices.
+	CodexSignedIn(ctx context.Context, scope Scope, providerID string) bool
+}
+
+// hostCodexToken is the openai.TokenSource over a CodexTokenStore.
+type hostCodexToken struct {
+	store CodexTokenStore
+	scope Scope
+	id    string
+}
+
+func (t hostCodexToken) Token(ctx context.Context, forceRefresh bool) (string, error) {
+	return t.store.CodexToken(ctx, t.scope, t.id, forceRefresh)
 }
 
 // NormalizeEfforts trims, lowercases and de-duplicates efforts and orders

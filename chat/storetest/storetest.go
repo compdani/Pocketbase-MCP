@@ -102,6 +102,102 @@ func Run(t *testing.T, newStore func(t *testing.T) chat.Store) {
 	t.Run("Summaries", func(t *testing.T) {
 		testSummaries(t, newStore(t))
 	})
+	t.Run("Import", func(t *testing.T) {
+		testImport(t, newStore(t))
+	})
+}
+
+// testImport checks the optional ImportStore: one transaction, kept order and
+// timestamps, an idempotent SourceID per owner, and an ordinary conversation
+// afterwards. A store without it is skipped.
+func testImport(t *testing.T, s chat.Store) {
+	importer, ok := s.(chat.ImportStore)
+	if !ok {
+		t.Skip("store does not implement chat.ImportStore")
+	}
+	owner := ownerKey()
+	base := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+	thread := chat.ImportedConversation{
+		SourceID: "agent_conversations:abc",
+		Messages: []chat.Message{
+			{Role: chat.RoleUser, Parts: []chat.Part{{Type: chat.PartText, Text: "Find the March campaign\nand more"}}, CreatedAt: base},
+			{Role: chat.RoleAssistant, Parts: []chat.Part{{Type: chat.PartToolCall, CallID: "c1", Tool: "list_campaigns", Arguments: json.RawMessage(`{"month":3}`)}}, CreatedAt: base.Add(time.Second)},
+			{Role: chat.RoleTool, Parts: []chat.Part{{Type: chat.PartToolResult, CallID: "c1", Tool: "list_campaigns", Result: json.RawMessage(`[{"id":7}]`)}}},
+			{Role: chat.RoleAssistant, Parts: []chat.Part{{Type: chat.PartText, Text: "Campaign 7."}}, CreatedAt: base.Add(3 * time.Second)},
+			{Role: chat.RoleNotice, Parts: []chat.Part{{Type: chat.PartProposalOutcome, ProposalID: "old-1", State: "succeeded", Tool: "send_campaign", Text: "[Proposal old-1 succeeded]"}}, CreatedAt: base.Add(4 * time.Second)},
+		},
+	}
+	conv, created, err := importer.ImportConversation(ctx(), owner, thread)
+	if err != nil || !created {
+		t.Fatalf("ImportConversation: created=%v err=%v", created, err)
+	}
+	if conv.Title != "Find the March campaign" || !conv.CreatedAt.Equal(base) || !conv.UpdatedAt.Equal(base.Add(4*time.Second)) {
+		t.Fatalf("conversation = %+v", conv)
+	}
+	msgs, _, err := s.ListMessages(ctx(), owner, conv.ID, chat.Page{Limit: 50})
+	if err != nil || len(msgs) != 5 {
+		t.Fatalf("messages = %d err = %v", len(msgs), err)
+	}
+	if msgs[2].Role != chat.RoleTool || !msgs[2].CreatedAt.Equal(base.Add(time.Second+time.Millisecond)) {
+		t.Fatalf("a message without a time comes right after its predecessor: %+v", msgs[2])
+	}
+	if msgs[4].Parts[0].State != "succeeded" || string(msgs[1].Parts[0].Arguments) != `{"month":3}` {
+		t.Fatalf("parts were not kept: %+v %+v", msgs[4].Parts, msgs[1].Parts)
+	}
+
+	again, created, err := importer.ImportConversation(ctx(), owner, thread)
+	if err != nil || created || again.ID != conv.ID {
+		t.Fatalf("second import: %+v created=%v err=%v", again, created, err)
+	}
+	if msgs, _, _ := s.ListMessages(ctx(), owner, conv.ID, chat.Page{Limit: 50}); len(msgs) != 5 {
+		t.Fatalf("a repeated import added messages: %d", len(msgs))
+	}
+	theirs, created, err := importer.ImportConversation(ctx(), otherOwner(), thread)
+	if err != nil || !created || theirs.ID == conv.ID {
+		t.Fatalf("another owner's import of the same source: %+v created=%v err=%v", theirs, created, err)
+	}
+
+	// An imported conversation continues like any other.
+	if _, err := s.AppendMessage(ctx(), owner, chat.Message{ConversationID: conv.ID, Role: chat.RoleUser, Parts: []chat.Part{{Type: chat.PartText, Text: "and now?"}}}); err != nil {
+		t.Fatalf("AppendMessage after import: %v", err)
+	}
+
+	// Concurrent imports of one source store it once.
+	race := chat.ImportedConversation{SourceID: "tab-race", Messages: []chat.Message{{Role: chat.RoleUser, Parts: []chat.Part{{Type: chat.PartText, Text: "twice"}}}}}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	stored := 0
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, made, err := importer.ImportConversation(ctx(), owner, race)
+			if err != nil {
+				t.Errorf("concurrent import: %v", err)
+				return
+			}
+			if made {
+				mu.Lock()
+				stored++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if stored != 1 {
+		t.Fatalf("%d concurrent imports of one source created %d conversations, want 1", 6, stored)
+	}
+
+	bad := chat.ImportedConversation{SourceID: "x", Messages: []chat.Message{{Role: "system", Parts: []chat.Part{{Type: chat.PartText, Text: "hi"}}}}}
+	if _, _, err := importer.ImportConversation(ctx(), owner, bad); !errors.Is(err, chat.ErrInvalidImport) {
+		t.Fatalf("bad role: err=%v, want ErrInvalidImport", err)
+	}
+	if list, _, _ := s.ListConversations(ctx(), owner, "", chat.Page{Limit: 50}); len(list) != 2 {
+		t.Fatalf("a refused import left %d conversations", len(list))
+	}
+	if err := s.DeleteConversation(ctx(), owner, conv.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
 }
 
 // testSummaries checks the optional SummaryStore: the latest summary only, a
@@ -1672,6 +1768,9 @@ func RunProposals(t *testing.T, newStore func(t *testing.T) proposalStore) {
 	t.Run("ProposalOwnerIsolation", func(t *testing.T) {
 		testProposalOwnerIsolation(t, newStore(t))
 	})
+	t.Run("ProposalWarnings", func(t *testing.T) {
+		testProposalWarnings(t, newStore(t))
+	})
 	t.Run("ProposalAllowedEdges", func(t *testing.T) {
 		testProposalAllowedEdges(t, newStore(t))
 	})
@@ -2480,5 +2579,55 @@ func testProposalDeepCopy(t *testing.T, s proposalStore) {
 	}
 	if stored.EditorRevision != "editor-rev-9" {
 		t.Fatalf("stored editor revision = %q", stored.EditorRevision)
+	}
+}
+
+// testProposalWarnings checks that a proposal's warnings survive a round trip
+// and a transition, and that a proposal without any reads back none.
+func testProposalWarnings(t *testing.T, s proposalStore) {
+	owner := ownerKey()
+	conv := mustCreateConversation(t, s, owner, "warnings")
+	_, hash := proposalHash(t, `{"a":1}`)
+	created, err := s.CreateProposal(ctx(), owner, chat.Proposal{
+		ConversationID: conv.ID, Tool: "publish", Location: chat.ProposalLocationServer,
+		Arguments: json.RawMessage(`{"a":1}`), ArgumentsHash: hash,
+		Warnings: []string{"the workflow has no trigger", "two steps share a name"},
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+	got, err := s.GetProposal(ctx(), owner, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Warnings) != 2 || got.Warnings[0] != "the workflow has no trigger" {
+		t.Fatalf("warnings = %q", got.Warnings)
+	}
+	decided, err := s.TransitionProposal(ctx(), owner, got.ID, chat.ProposalStatePending, got.Revision, chat.ProposalStateRejected, chat.ProposalUpdate{Decided: true})
+	if err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if len(decided.Warnings) != 2 {
+		t.Fatalf("warnings after a transition = %q", decided.Warnings)
+	}
+	// An edit clears warnings that described the old arguments.
+	warned, err := s.CreateProposal(ctx(), owner, chat.Proposal{
+		ConversationID: conv.ID, Tool: "publish", Location: chat.ProposalLocationServer,
+		Arguments: json.RawMessage(`{"c":3}`), Warnings: []string{"stale soon"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revised, err := s.ReviseProposal(ctx(), owner, warned.ID, warned.Revision, json.RawMessage(`{"c":4}`), "")
+	if err != nil {
+		t.Fatalf("ReviseProposal: %v", err)
+	}
+	if revised.Warnings != nil || revised.Failure != "" {
+		t.Fatalf("revised proposal kept %q / %q", revised.Warnings, revised.Failure)
+	}
+
+	plain := mustCreateProposal(t, s, owner, conv.ID, chat.ProposalLocationServer, "publish", `{"b":2}`)
+	if plain.Warnings != nil {
+		t.Fatalf("a proposal without warnings reads back %q", plain.Warnings)
 	}
 }

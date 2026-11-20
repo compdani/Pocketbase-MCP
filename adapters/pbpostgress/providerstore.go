@@ -42,6 +42,7 @@ const (
 	providerFieldBaseURL       = "baseURL"
 	providerFieldOAuthURL      = "oauthBaseURL"
 	providerFieldWireAPI       = "wireAPI"
+	providerFieldMaxTokens     = "maxTokensField"
 	providerFieldModels        = "models"
 	providerFieldDefault       = "defaultModel"
 	providerFieldHeaders       = "headers" // deprecated plaintext field, read-only fallback
@@ -79,6 +80,7 @@ func NewProviderStore(app core.App, opts ProviderStoreOptions) (*ProviderStore, 
 	if app == nil {
 		return nil, errors.New("provider store: nil app")
 	}
+	noteChatDatabase(app)
 	if err := opts.Scope.Validate(); err != nil {
 		return nil, err
 	}
@@ -141,6 +143,7 @@ func (s *ProviderStore) specs() []chatCollectionSpec {
 					chatTextField(providerFieldBaseURL, chatMaxTextLen, true),
 					chatTextField(providerFieldOAuthURL, chatMaxTextLen, true),
 					chatTextField(providerFieldWireAPI, chatMaxTextLen, true),
+					chatTextField(providerFieldMaxTokens, chatMaxTextLen, true),
 					chatJSONTextField(providerFieldModels),
 					chatTextField(providerFieldDefault, chatMaxTextLen, true),
 					chatJSONTextField(providerFieldHeadersCipher),
@@ -153,7 +156,7 @@ func (s *ProviderStore) specs() []chatCollectionSpec {
 					&core.DateField{Name: providerFieldUpdatedAt, System: true},
 				)
 			},
-			addFields: []string{providerFieldHeadersCipher},
+			addFields: []string{providerFieldHeadersCipher, providerFieldMaxTokens},
 			indexes: []chatIndexSpec{
 				{name: "idx_" + s.providers + "_scope_slug", unique: true, columns: providerFieldNamespace + ", " + providerFieldMount + ", " + providerFieldSlug},
 			},
@@ -265,6 +268,7 @@ func (s *ProviderStore) SaveProvider(ctx context.Context, scope catalog.Scope, p
 		rec.Set(providerFieldBaseURL, p.BaseURL)
 		rec.Set(providerFieldOAuthURL, p.OAuthBaseURL)
 		rec.Set(providerFieldWireAPI, p.WireAPI)
+		rec.Set(providerFieldMaxTokens, p.MaxTokensField)
 		rec.Set(providerFieldDefault, p.DefaultModel)
 		if err := s.setJSON(rec, providerFieldModels, p.Models); err != nil {
 			return err
@@ -518,14 +522,15 @@ func (s *ProviderStore) checkScope(scope catalog.Scope) error {
 
 func (s *ProviderStore) providerFrom(rec *core.Record) (catalog.Provider, error) {
 	p := catalog.Provider{
-		ID:           rec.GetString(providerFieldSlug),
-		Label:        rec.GetString(providerFieldLabel),
-		Kind:         catalog.Kind(rec.GetString(providerFieldKind)),
-		Enabled:      rec.GetBool(providerFieldEnabled),
-		BaseURL:      rec.GetString(providerFieldBaseURL),
-		OAuthBaseURL: rec.GetString(providerFieldOAuthURL),
-		WireAPI:      rec.GetString(providerFieldWireAPI),
-		DefaultModel: rec.GetString(providerFieldDefault),
+		ID:             rec.GetString(providerFieldSlug),
+		Label:          rec.GetString(providerFieldLabel),
+		Kind:           catalog.Kind(rec.GetString(providerFieldKind)),
+		Enabled:        rec.GetBool(providerFieldEnabled),
+		BaseURL:        rec.GetString(providerFieldBaseURL),
+		OAuthBaseURL:   rec.GetString(providerFieldOAuthURL),
+		WireAPI:        rec.GetString(providerFieldWireAPI),
+		MaxTokensField: rec.GetString(providerFieldMaxTokens),
+		DefaultModel:   rec.GetString(providerFieldDefault),
 	}
 	if raw := chatRawJSON(rec, providerFieldModels); len(raw) > 0 {
 		_ = json.Unmarshal(raw, &p.Models)

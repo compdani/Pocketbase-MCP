@@ -176,9 +176,12 @@ type fixtureOptions struct {
 	maxAttachments    int
 	maxUploadsPerConv int
 	// turnContext accepts a page context on turns; setup is the runner hook.
-	turnContext bool
-	maxContext  int
-	setup       func(context.Context, TurnInput) (TurnSetup, error)
+	turnContext  bool
+	storeContext bool
+	imports      bool
+	otherImages  bool
+	maxContext   int
+	setup        func(context.Context, TurnInput) (TurnSetup, error)
 	// contextWindow sets RunnerConfig.ContextWindow; compaction turns
 	// summaries on.
 	contextWindow int
@@ -251,6 +254,9 @@ func newFixture(t *testing.T, opts fixtureOptions) *apiFixture {
 		MaxAttachmentsPerTurn:     opts.maxAttachments,
 		MaxUploadsPerConversation: opts.maxUploadsPerConv,
 		TurnContext:               opts.turnContext,
+		StoreContext:              opts.storeContext,
+		Imports:                   opts.imports,
+		AcceptOtherImages:         opts.otherImages,
 		MaxContextBytes:           opts.maxContext,
 	})
 	if err != nil {
