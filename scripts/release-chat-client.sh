@@ -1,9 +1,9 @@
 #!/bin/sh
 # Prepare a release of the browser client (frontend/client) for its mirror
-# repository, so hosts can install it with npm from a git tag:
+# repository, so hosts can install it with npm from a tagged tarball:
 #
-#   scripts/release-chat-client.sh v0.1.8
-#   npm install github:compdani/pocketbase-mcp-chat-client#v0.1.8
+#   scripts/release-chat-client.sh v0.1.9
+#   npm install https://codeload.github.com/compdani/pocketbase-mcp-chat-client/tar.gz/refs/tags/v0.1.9
 #
 # npm can't install a subdirectory of a git repository, so the client's history
 # is split out (git subtree split) into a tree whose root is the package. The

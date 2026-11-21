@@ -4,6 +4,15 @@ Dependency-free browser client and framework-neutral controller for the MCP chat
 HTTP API (protocol v1). Plain ES modules plus hand-written type declarations; it
 runs in browsers and in Node 22 using only standard web APIs.
 
+## Install
+
+```sh
+npm install https://codeload.github.com/compdani/pocketbase-mcp-chat-client/tar.gz/refs/tags/v0.1.9
+```
+
+Chat client v0.1.9 is compatible with the existing PocketBase MCP backend
+v0.1.8; no backend upgrade is required.
+
 ## Usage
 
 ```js

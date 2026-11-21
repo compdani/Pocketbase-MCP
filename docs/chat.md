@@ -656,7 +656,13 @@ key, header value or token; only a last-four hint and header names.
 ## 9. Browser client and examples
 
 `frontend/client` (`@pocketbase-mcp/chat-client`) is a dependency-free
-browser package:
+browser package. Install client v0.1.9 (compatible with backend v0.1.8):
+
+```sh
+npm install https://codeload.github.com/compdani/pocketbase-mcp-chat-client/tar.gz/refs/tags/v0.1.9
+```
+
+It provides:
 
 - `ChatClient`: the HTTP API, with a fetch-based SSE reader. It takes a
   `getToken` callback and only sends the token in a header.

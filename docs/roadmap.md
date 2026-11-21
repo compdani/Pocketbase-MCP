@@ -10,14 +10,15 @@ line for every failed chat turn (with the provider's sanitized reason), plain
 messages for failed-turn codes in the agent-panel binding, and per-turn
 reasoning effort.
 
-Unreleased (v0.1.8), for List Pocket: the agent-panel binding refuses a
+Released in v0.1.8, for List Pocket: the agent-panel binding refuses a
 second submit while the first is still on its way (`running` covers it, and
 the controller has `state.sending`), puts the draft and references back after
 any failure before the turn was accepted (`restoreDraft`), and disables the
 composer while `features.ready` is false (`disableWhenNotReady`). The browser
-client is versioned with the module (0.1.8) and released to a mirror
-repository with `scripts/release-chat-client.sh`, so hosts can install it from
-a git tag instead of vendoring it.
+client is released to a mirror repository with `scripts/release-chat-client.sh`,
+so hosts can install a tagged package instead of vendoring it. Client v0.1.9
+includes the UI update and is compatible with backend v0.1.8; see the
+[client installation instructions](../frontend/client/README.md#install).
 
 Released in v0.1.7, for List Pocket: `503 no_provider` and `features.ready` when no
 model provider is set up; decided proposals (`decidedProposals`) and outcome
