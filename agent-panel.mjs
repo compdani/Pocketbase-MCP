@@ -279,10 +279,19 @@ function toolResultsOf(messages) {
     if (!message || !Array.isArray(message.parts)) continue;
     for (const part of message.parts) {
       if (!part || part.type !== 'tool_result' || part.callId === undefined) continue;
-      results.set(String(part.callId), { failed: part.isError === true });
+      results.set(String(part.callId), { failed: part.isError === true, result: part.result });
     }
   }
   return results;
+}
+
+/** The default tool row renders this data as escaped, formatted JSON. */
+function toolDetail(argumentsValue, outcome) {
+  const detail = {};
+  if (argumentsValue !== undefined) detail.arguments = argumentsValue;
+  if (outcome && outcome.result !== undefined) detail.result = outcome.result;
+  if (outcome && outcome.message) detail.error = outcome.message;
+  return Object.keys(detail).length ? { detail } : {};
 }
 
 function hasUserText(messages, text) {
@@ -529,6 +538,8 @@ export function entriesFromState(state, options = {}) {
   const turn = state && state.turn && typeof state.turn === 'object' ? state.turn : null;
   const activeTurnId = turn && turn.turnId ? String(turn.turnId) : '';
   const running = state?.running === true;
+  const liveCalls = new Map((Array.isArray(turn?.tools) ? turn.tools : [])
+    .filter(Boolean).map((tool) => [String(tool.callId ?? ''), tool]));
 
   const entries = [];
   const summarizedThrough = typeof state?.context?.summarizedThrough === 'string'
@@ -618,7 +629,10 @@ export function entriesFromState(state, options = {}) {
       if (part.type === 'tool_call') {
         flushText();
         const callId = String(part.callId ?? '');
-        const result = results.get(callId);
+        const live = turnId === activeTurnId ? liveCalls.get(callId) : undefined;
+        const result = results.get(callId) ?? (live && live.status !== 'running'
+          ? { failed: live.status === 'failed', result: live.result, message: live.message }
+          : undefined);
         const tool = {
           id: callId,
           name: typeof part.tool === 'string' && part.tool !== '' ? part.tool : 'tool',
@@ -627,6 +641,7 @@ export function entriesFromState(state, options = {}) {
             // An unresolved call in a turn that is not running now was cut off.
             : (running && turnId !== '' && turnId === activeTurnId ? 'running' : 'failed'),
         };
+        Object.assign(tool, toolDetail(part.arguments !== undefined ? part.arguments : live?.arguments, result));
         tools.push(tool);
       }
       // tool_result inside an assistant message was already collected above.
@@ -692,6 +707,7 @@ export function entriesFromState(state, options = {}) {
         // A tool still marked running in a turn that has ended was cut off; a
         // spinner would never stop.
         status: !running && toolStatus(tool.status) === 'running' ? 'failed' : toolStatus(tool.status),
+        ...toolDetail(tool.arguments, tool.status === 'running' ? undefined : tool),
       });
     }
 

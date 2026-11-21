@@ -395,7 +395,7 @@ binding registers with `defineEntry()`:
 
 ```js
 { id, type: 'text', role: 'user' | 'assistant', content, references? }
-{ id, type: 'tools', tools: [{ id, name, status: 'running' | 'completed' | 'failed' }] }
+{ id, type: 'tools', tools: [{ id, name, status: 'running' | 'completed' | 'failed', detail? }] }
 { id, type: 'notice', content, proposalId?, state?, tool?, isError?, result?, proposal? }
 {
   id, type: 'proposal', proposalId, tool, summary, state, location, revision,
@@ -431,8 +431,9 @@ binding registers with `defineEntry()`:
   replaced by canonical messages after the terminal reload.
 - The message just submitted is echoed as a user bubble until the reloaded
   transcript contains it, so the first second of a turn is not empty.
-- `detail` is left out: raw tool arguments and results are protocol internals,
-  and the panel's default tool rows do not need them.
+- Expand a tool row to inspect `detail`: the supplied `arguments`, returned
+  `result`, and `error` message when available. These details are retained during
+  streaming and restored from the saved transcript on reopen.
 
 Events handled:
 

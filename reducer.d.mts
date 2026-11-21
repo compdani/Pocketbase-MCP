@@ -6,6 +6,8 @@ import type { ChatEvent, ChatMessage, ChatProposal, ChatTurn, ChatTurnFailure } 
 export interface ToolView {
   callId: string;
   tool: string;
+  /** Parsed arguments supplied to the tool, when available. */
+  arguments?: unknown;
   status: 'running' | 'completed' | 'failed';
   /** Parsed tool result, or null while running/absent. */
   result: unknown;
