@@ -23,7 +23,8 @@ import {
   CONTEXT_MARKER_TYPE,
   contextUsageFromState,
 } from '../agent-panel.mjs';
-import { message } from './support.mjs';
+import { event, message } from './support.mjs';
+import { applyEvent, createTurnView } from '../reducer.mjs';
 
 // --- doubles ---------------------------------------------------------------
 
@@ -216,7 +217,7 @@ test('entry fields stay inside agent-panel element.d.ts TextEntry/ToolsEntry', (
     {
       id: 'tools:m2',
       type: 'tools',
-      tools: [{ id: 'call-1', name: 'search_contracts', status: 'completed' }],
+      tools: [{ id: 'call-1', name: 'search_contracts', status: 'completed', detail: { arguments: {}, result: { results: [] } } }],
     },
   ]);
 
@@ -230,7 +231,7 @@ test('entry fields stay inside agent-panel element.d.ts TextEntry/ToolsEntry', (
     } else if (entry.type === 'tools') {
       assert.ok(Array.isArray(entry.tools));
       for (const tool of entry.tools) {
-        assert.deepEqual(Object.keys(tool).sort(), ['id', 'name', 'status']);
+        assert.deepEqual(Object.keys(tool).sort(), ['detail', 'id', 'name', 'status']);
         assert.equal(typeof tool.name, 'string');
         assert.ok(['running', 'completed', 'failed'].includes(tool.status));
       }
@@ -322,7 +323,7 @@ test('a live tool moves from running to completed', () => {
     {
       id: 'tools:t1',
       type: 'tools',
-      tools: [{ id: 'call-1', name: 'search_contracts', status: 'completed' }],
+      tools: [{ id: 'call-1', name: 'search_contracts', status: 'completed', detail: { result: {} } }],
     },
   ]);
 });
@@ -1431,4 +1432,46 @@ test('the composer is disabled while no provider is set up', () => {
   hostDisabled.disabled = true;
   bindAgentPanel(hostDisabled, makeController(stateOf({ features: { ready: true } })));
   assert.equal(hostDisabled.disabled, true);
+});
+
+
+test('expanded tool details show streamed arguments, results and errors', () => {
+  let turn = applyEvent(createTurnView(), event(1, 'tool.started', {
+    callId: 'a', tool: 'search', arguments: { query: 'campaigns' },
+  }));
+  const row = () => entriesFromState({ messages: [], running: true, turn })[0].tools[0];
+  assert.deepEqual(row().detail, { arguments: { query: 'campaigns' } });
+  turn = applyEvent(turn, event(2, 'tool.completed', { callId: 'a', tool: 'search', result: false }));
+  assert.deepEqual(row().detail, { arguments: { query: 'campaigns' }, result: false });
+  turn = applyEvent(turn, event(3, 'tool.started', { callId: 'a', tool: 'search', arguments: {} }));
+  turn = applyEvent(turn, event(4, 'tool.failed', { callId: 'a', tool: 'search', message: 'Access denied' }));
+  assert.equal(row().detail.error, 'Access denied');
+  assert.equal(row().status, 'failed');
+});
+
+test('transcript tool rows retain falsy payloads and inline failed results', () => {
+  const entries = entriesFromState({ messages: [message('m1', 'assistant', '', {
+    parts: [
+      { type: 'tool_call', callId: 'a', tool: 'search', arguments: null },
+      { type: 'tool_result', callId: 'a', isError: true, result: 'Access denied' },
+      { type: 'tool_call', callId: 'b', tool: 'count', arguments: {} },
+      { type: 'tool_result', callId: 'b', result: 0 },
+    ],
+  })] });
+  assert.deepEqual(entries[0].tools[0].detail, { arguments: null, result: 'Access denied' });
+  assert.equal(entries[0].tools[0].status, 'failed');
+  assert.deepEqual(entries[0].tools[1].detail, { arguments: {}, result: 0 });
+});
+
+test('a transcript call uses its live outcome until the stored result arrives', () => {
+  const entries = entriesFromState({
+    running: true,
+    messages: [message('m1', 'assistant', '', { turnId: 't1', parts: [
+      { type: 'tool_call', callId: 'a', tool: 'search', arguments: { q: 'x' } },
+    ] })],
+    turn: { turnId: 't1', tools: [{ callId: 'a', tool: 'search', status: 'completed', result: [] }] },
+  });
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].tools[0].status, 'completed');
+  assert.deepEqual(entries[0].tools[0].detail, { arguments: { q: 'x' }, result: [] });
 });

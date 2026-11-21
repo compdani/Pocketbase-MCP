@@ -348,6 +348,7 @@ export function applyEvent(view, event) {
         callId: stringField(data, 'callId', event.type),
         tool: stringField(data, 'tool', event.type),
         status: TOOL_STATUSES.RUNNING,
+        ...(data.arguments !== undefined ? { arguments: cloneValue(data.arguments) } : {}),
         result: null,
         message: '',
       };
@@ -484,6 +485,7 @@ export function viewFromTranscript(turn, messages = []) {
           tools = putTool(tools, {
             callId: String(part.callId ?? ''),
             tool: String(part.tool ?? ''),
+            ...(part.arguments !== undefined ? { arguments: cloneValue(part.arguments) } : {}),
             status: TOOL_STATUSES.RUNNING,
             result: null,
             message: '',

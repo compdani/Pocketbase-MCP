@@ -122,6 +122,7 @@ test('tools move through running, completed and failed', () => {
   assert.deepEqual(view.tools[0], {
     callId: 'a',
     tool: 'search',
+    arguments: { q: 'x' },
     status: TOOL_STATUSES.COMPLETED,
     result: { n: 1 },
     message: '',
@@ -357,4 +358,24 @@ test('an editor proposal moves through approved, applied and stale', () => {
   assert.equal(view.proposals[0].state, 'applied');
   assert.equal(view.proposals[0].editorRevision, '7');
   assert.deepEqual(view.proposals[0].hunks, [{ id: 'h1', status: 'applied' }]);
+});
+
+
+test('tool arguments survive transcript resync and are copied from event data', () => {
+  const argumentsValue = { filter: { active: true } };
+  const view = applyEvent(createTurnView(), event(1, 'tool.started', {
+    callId: 'a', tool: 'search', arguments: argumentsValue,
+  }));
+  argumentsValue.filter.active = false;
+  assert.deepEqual(view.tools[0].arguments, { filter: { active: true } });
+  const restored = viewFromTranscript({ id: 't1', state: 'completed' }, [
+    message('m1', 'assistant', '', { turnId: 't1', parts: [
+      { type: 'tool_call', callId: 'a', tool: 'search', arguments: { q: 'x' } },
+    ] }),
+    message('m2', 'tool', '', { turnId: 't1', parts: [
+      { type: 'tool_result', callId: 'a', result: false },
+    ] }),
+  ]);
+  assert.deepEqual(restored.tools[0].arguments, { q: 'x' });
+  assert.equal(restored.tools[0].result, false);
 });
