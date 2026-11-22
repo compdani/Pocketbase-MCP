@@ -65,11 +65,13 @@ func TestReasoningEffortOnTheWire(t *testing.T) {
 	if reasoning["effort"] != "low" {
 		t.Fatalf("responses reasoning = %v, want effort low", got["reasoning"])
 	}
-	req.ReasoningEffort = "max"
-	got = captureBody(t, WireResponses, req)
-	reasoning, _ = got["reasoning"].(map[string]any)
-	if reasoning["effort"] != "max" {
-		t.Fatalf("responses reasoning = %v, want effort max", got["reasoning"])
+	for _, effort := range []string{"max", "ultra"} {
+		req.ReasoningEffort = effort
+		got = captureBody(t, WireResponses, req)
+		reasoning, _ = got["reasoning"].(map[string]any)
+		if reasoning["effort"] != effort {
+			t.Fatalf("responses reasoning = %v, want effort %s", got["reasoning"], effort)
+		}
 	}
 }
 
