@@ -65,6 +65,12 @@ func TestReasoningEffortOnTheWire(t *testing.T) {
 	if reasoning["effort"] != "low" {
 		t.Fatalf("responses reasoning = %v, want effort low", got["reasoning"])
 	}
+	req.ReasoningEffort = "max"
+	got = captureBody(t, WireResponses, req)
+	reasoning, _ = got["reasoning"].(map[string]any)
+	if reasoning["effort"] != "max" {
+		t.Fatalf("responses reasoning = %v, want effort max", got["reasoning"])
+	}
 }
 
 func TestUnknownReasoningEffortRefused(t *testing.T) {

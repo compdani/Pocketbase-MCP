@@ -517,7 +517,7 @@ catalog change never switches a running turn to another provider.
 
 **Reasoning effort.** A choice lists the efforts its model accepts in
 `efforts` (lowest first, from `none`, `minimal`, `low`, `medium`, `high`,
-`xhigh`), and a turn may name one with `"effort": "high"`. It is stored on the
+`xhigh`, `max`), and a turn may name one with `"effort": "high"`. It is stored on the
 turn and sent as `reasoning_effort` (Chat Completions) or `reasoning.effort`
 (Responses and the Codex plan route). An effort the resolved choice does not
 list is `400 invalid_request`, never a failed turn; omitting it uses the
