@@ -4,7 +4,7 @@ go 1.27
 
 require (
 	ganigeorgiev.com/pocketbase/pocketbase v0.41.1
-	github.com/compdani/pocketbase-mcp v0.1.9
+	github.com/compdani/pocketbase-mcp v0.2.0
 )
 
 require (

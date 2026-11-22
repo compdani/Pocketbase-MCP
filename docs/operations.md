@@ -141,16 +141,16 @@ The root module and the submodules (`auth/stockoauth`, `adapters/pocketbase`,
    `replace` for this repo goes in a submodule's `go.mod`: Go ignores a
    dependency's replaces, so another module would fail to build.
 2. Run the tests above, then commit.
-3. `sh scripts/release-tags.sh v0.1.9` checks the requires and creates the tags
-   `v0.1.9`, `auth/stockoauth/v0.1.9`, `adapters/pocketbase/v0.1.9` and
-   `adapters/pbpostgress/v0.1.9` on that commit. It prints the push command.
+3. `sh scripts/release-tags.sh v0.2.0` checks the requires and creates the tags
+   `v0.2.0`, `auth/stockoauth/v0.2.0`, `adapters/pocketbase/v0.2.0` and
+   `adapters/pbpostgress/v0.2.0` on that commit. It prints the push command.
    Stop if the script fails; no release tags have been created. Chain the
    script and pushes with `&&` so a failed check also stops the pushes:
 
    ```sh
-   sh scripts/release-tags.sh v0.1.9 &&
+   sh scripts/release-tags.sh v0.2.0 &&
      git push origin master &&
-     git push origin v0.1.9 auth/stockoauth/v0.1.9 adapters/pocketbase/v0.1.9 adapters/pbpostgress/v0.1.9
+     git push origin v0.2.0 auth/stockoauth/v0.2.0 adapters/pocketbase/v0.2.0 adapters/pbpostgress/v0.2.0
    ```
 4. After pushing, `GOWORK=off go mod tidy` in each submodule records the
    root's checksum in its `go.sum` (a follow-up commit).
