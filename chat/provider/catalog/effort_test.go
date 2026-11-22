@@ -8,9 +8,49 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/compdani/pocketbase-mcp/chat"
+	"github.com/compdani/pocketbase-mcp/chat/provider/codex"
 )
+
+func TestCodexRefreshWithMaxEffortCanBeEnabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" || r.Header.Get("Authorization") != "Bearer access" {
+			t.Errorf("unexpected model request: %s, authenticated=%v", r.URL.Path, r.Header.Get("Authorization") != "")
+		}
+		_, _ = fmt.Fprint(w, `{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"max"},{"effort":"low"},{"effort":"high"}]}]}`)
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	store := newFakeStore()
+	store.providers["chatgpt"] = Provider{ID: "chatgpt", Kind: KindCodex, BaseURL: srv.URL}
+	store.creds["chatgpt"] = &codex.Credentials{AccessToken: "access", Scopes: []string{codex.PlanScope}, ExpiresAt: time.Now().Add(time.Hour)}
+	admin, err := NewAdmin(RouterOptions{Scope: testScope(), Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Router().Close()
+	if _, err := admin.RefreshProviderModels(ctx, "chatgpt", true); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.GetProvider(ctx, testScope(), "chatgpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Durable stores validate on save; the fake store does not.
+	if err := saved.Validate(); err != nil {
+		t.Fatalf("refreshed provider cannot be persisted: %v", err)
+	}
+	enabled := true
+	if _, err := admin.SaveProvider(ctx, "chatgpt", chat.ProviderInput{Enabled: &enabled}); err != nil {
+		t.Fatalf("enable refreshed provider: %v", err)
+	}
+	choices, err := admin.Router().Choices(ctx)
+	if err != nil || len(choices) != 1 || !slices.Equal(choices[0].Efforts, []string{"low", "high", "max"}) {
+		t.Fatalf("choices = %+v, err = %v", choices, err)
+	}
+}
 
 func TestDefaultEffortsGuessesOpenAIReasoningModels(t *testing.T) {
 	for id, want := range map[string]bool{

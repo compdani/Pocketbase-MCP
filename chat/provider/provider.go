@@ -90,7 +90,7 @@ type Request struct {
 
 // ReasoningEfforts are the effort levels a request may name, lowest first.
 // Which ones a model accepts is per model (catalog Model.Efforts).
-var ReasoningEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+var ReasoningEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 // ValidReasoningEffort reports whether effort is one of ReasoningEfforts.
 func ValidReasoningEffort(effort string) bool {

@@ -162,7 +162,7 @@ export function modelsFromState(state) {
 
 const EFFORT_OPTION_ID = 'effort';
 const EFFORT_LABELS = Object.freeze({
-  none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high',
+  none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max',
 });
 
 /**
