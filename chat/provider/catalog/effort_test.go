@@ -14,12 +14,15 @@ import (
 	"github.com/compdani/pocketbase-mcp/chat/provider/codex"
 )
 
-func TestCodexRefreshWithMaxEffortCanBeEnabled(t *testing.T) {
+func TestCodexRefreshWithMaxAndUltraEffortsCanBeEnabled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" || r.Header.Get("Authorization") != "Bearer access" {
 			t.Errorf("unexpected model request: %s, authenticated=%v", r.URL.Path, r.Header.Get("Authorization") != "")
 		}
-		_, _ = fmt.Fprint(w, `{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"max"},{"effort":"low"},{"effort":"high"}]}]}`)
+		_, _ = fmt.Fprint(w, `{"models":[
+			{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"max"},{"effort":"low"},{"effort":"high"}]},
+			{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{"effort":"ultra"},{"effort":"max"},{"effort":"high"}]}
+		]}`)
 	}))
 	defer srv.Close()
 	ctx := context.Background()
@@ -47,8 +50,17 @@ func TestCodexRefreshWithMaxEffortCanBeEnabled(t *testing.T) {
 		t.Fatalf("enable refreshed provider: %v", err)
 	}
 	choices, err := admin.Router().Choices(ctx)
-	if err != nil || len(choices) != 1 || !slices.Equal(choices[0].Efforts, []string{"low", "high", "max"}) {
+	if err != nil || len(choices) != 2 {
 		t.Fatalf("choices = %+v, err = %v", choices, err)
+	}
+	want := map[string][]string{
+		"gpt-5.6-luna": {"low", "high", "max"},
+		"gpt-5.6-sol":  {"high", "max", "ultra"},
+	}
+	for _, choice := range choices {
+		if efforts, ok := want[choice.Model]; !ok || !slices.Equal(choice.Efforts, efforts) {
+			t.Errorf("unexpected choice: %+v", choice)
+		}
 	}
 }
 
