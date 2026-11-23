@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "sample_stream_single_chunk",
+      "chunks": [
+        ": ping\n\nid: 1\nevent: turn.queued\ndata: {\"v\":\"1\",\"seq\":1,\"text\":\"héllo 🌍\"}\n\nid: 2\nevent: text.delta\ndata: line one\ndata: line two\n\nid: 3\nevent: turn.completed\ndata: {\"v\":\"1\",\"seq\":3}"
+      ],
+      "expectedComments": ["ping"],
+      "expectedFrames": [
+        { "id": "1", "event": "turn.queued", "data": "{\"v\":\"1\",\"seq\":1,\"text\":\"héllo 🌍\"}" },
+        { "id": "2", "event": "text.delta", "data": "line one\nline two" },
+        { "id": "3", "event": "turn.completed", "data": "{\"v\":\"1\",\"seq\":3}" }
+      ]
+    },
+    {
+      "name": "crlf_split_across_chunks",
+      "chunks": ["data: a\r", "\ndata: b\r", "\n\r", "\ndata: c\r\n\r\n"],
+      "expectedComments": [],
+      "expectedFrames": [
+        { "id": "", "event": "message", "data": "a\nb" },
+        { "id": "", "event": "message", "data": "c" }
+      ]
+    },
+    {
+      "name": "lone_cr_line_endings",
+      "chunks": ["id: 1\revent: ping\rdata: one\r\rid: 2\rdata: two\r\r"],
+      "expectedComments": [],
+      "expectedFrames": [
+        { "id": "1", "event": "ping", "data": "one" },
+        { "id": "2", "event": "message", "data": "two" }
+      ]
+    },
+    {
+      "name": "comments_only_and_leading_space_strip",
+      "chunks": [": ping\n\n:ping-two\r\ndata: x\n\n: tail"],
+      "expectedComments": ["ping", "ping-two", "tail"],
+      "expectedFrames": [
+        { "id": "", "event": "message", "data": "x" }
+      ]
+    },
+    {
+      "name": "persistent_id_across_frames",
+      "chunks": ["id: 7\ndata: a\n\ndata: b\n\nid: 8\ndata: c\n\n"],
+      "expectedComments": [],
+      "expectedFrames": [
+        { "id": "7", "event": "message", "data": "a" },
+        { "id": "7", "event": "message", "data": "b" },
+        { "id": "8", "event": "message", "data": "c" }
+      ]
+    },
+    {
+      "name": "data_less_frame_dispatches_nothing",
+      "chunks": ["id: 4\nevent: ignored\n\nid: 5\n"],
+      "expectedComments": [],
+      "expectedFrames": []
+    },
+    {
+      "name": "utf8_multibyte_split_byte_by_byte",
+      "splitByteByByte": true,
+      "chunks": ["id: 1\nevent: text.delta\ndata: héllo 🌍 wörld\n\n"],
+      "expectedComments": [],
+      "expectedFrames": [
+        { "id": "1", "event": "text.delta", "data": "héllo 🌍 wörld" }
+      ]
+    },
+    {
+      "name": "event_too_large_utf8_bytes",
+      "maxEventBytes": 10,
+      "chunks": ["data: 🌍🌍🌍🌍\n\n"],
+      "expectedErrorCode": "event_too_large"
+    }
+  ]
+}

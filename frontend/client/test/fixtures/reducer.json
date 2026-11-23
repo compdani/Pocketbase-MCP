@@ -1,0 +1,217 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "happy_path_text_usage_completed",
+      "initialTurnId": "",
+      "events": [
+        { "v": "1", "seq": 1, "conversationId": "c1", "turnId": "t1", "type": "turn.queued", "at": "2026-01-02T03:04:05.001Z" },
+        { "v": "1", "seq": 2, "conversationId": "c1", "turnId": "t1", "type": "turn.started", "at": "2026-01-02T03:04:05.002Z" },
+        { "v": "1", "seq": 3, "conversationId": "c1", "turnId": "t1", "type": "text.delta", "data": { "text": "héllo " }, "at": "2026-01-02T03:04:05.003Z" },
+        { "v": "1", "seq": 4, "conversationId": "c1", "turnId": "t1", "type": "text.delta", "data": "{\"text\":\"🌍 wörld\"}", "at": "2026-01-02T03:04:05.004Z" },
+        { "v": "1", "seq": 5, "conversationId": "c1", "turnId": "t1", "type": "usage.updated", "data": { "inputTokens": 10, "outputTokens": 7 }, "at": "2026-01-02T03:04:05.005Z" },
+        { "v": "1", "seq": 6, "conversationId": "c1", "turnId": "t1", "type": "turn.completed", "at": "2026-01-02T03:04:05.006Z" }
+      ],
+      "expected": {
+        "turnId": "t1",
+        "state": "completed",
+        "text": "héllo 🌍 wörld",
+        "tools": [],
+        "usage": { "inputTokens": 10, "outputTokens": 7 },
+        "error": null,
+        "proposals": [],
+        "lastSeq": 6
+      }
+    },
+    {
+      "name": "replay_duplicates_ignored",
+      "initialTurnId": "",
+      "events": [
+        { "v": "1", "seq": 1, "conversationId": "c1", "turnId": "t1", "type": "turn.started", "at": "2026-01-02T03:04:05.001Z" },
+        { "v": "1", "seq": 2, "conversationId": "c1", "turnId": "t1", "type": "text.delta", "data": { "text": "ab" }, "at": "2026-01-02T03:04:05.002Z" },
+        { "v": "1", "seq": 2, "conversationId": "c1", "turnId": "t1", "type": "text.delta", "data": { "text": "ab" }, "at": "2026-01-02T03:04:05.002Z" },
+        { "v": "1", "seq": 3, "conversationId": "c1", "turnId": "t1", "type": "turn.completed", "at": "2026-01-02T03:04:05.003Z" },
+        { "v": "1", "seq": 3, "conversationId": "c1", "turnId": "t1", "type": "turn.completed", "at": "2026-01-02T03:04:05.003Z" }
+      ],
+      "expected": {
+        "turnId": "t1",
+        "state": "completed",
+        "text": "ab",
+        "tools": [],
+        "usage": null,
+        "error": null,
+        "proposals": [],
+        "lastSeq": 3
+      }
+    },
+    {
+      "name": "tools_running_completed_and_failed",
+      "initialTurnId": "",
+      "events": [
+        { "v": "1", "seq": 1, "conversationId": "c1", "turnId": "t1", "type": "turn.started", "at": "2026-01-02T03:04:05.001Z" },
+        { "v": "1", "seq": 2, "conversationId": "c1", "turnId": "t1", "type": "tool.started", "data": { "callId": "a", "tool": "search", "arguments": { "q": "x" } }, "at": "2026-01-02T03:04:05.002Z" },
+        { "v": "1", "seq": 3, "conversationId": "c1", "turnId": "t1", "type": "tool.started", "data": { "callId": "b", "tool": "fetch" }, "at": "2026-01-02T03:04:05.003Z" },
+        { "v": "1", "seq": 4, "conversationId": "c1", "turnId": "t1", "type": "tool.completed", "data": { "callId": "a", "tool": "search", "result": { "n": 1 } }, "at": "2026-01-02T03:04:05.004Z" },
+        { "v": "1", "seq": 5, "conversationId": "c1", "turnId": "t1", "type": "tool.failed", "data": { "callId": "b", "tool": "fetch", "message": "boom" }, "at": "2026-01-02T03:04:05.005Z" }
+      ],
+      "expected": {
+        "turnId": "t1",
+        "state": "running",
+        "text": "",
+        "tools": [
+          { "callId": "a", "tool": "search", "arguments": { "q": "x" }, "status": "completed", "result": { "n": 1 }, "message": "" },
+          { "callId": "b", "tool": "fetch", "status": "failed", "result": null, "message": "boom" }
+        ],
+        "usage": null,
+        "error": null,
+        "proposals": [],
+        "lastSeq": 5
+      }
+    },
+    {
+      "name": "turn_failed_interrupted_maps_to_interrupted",
+      "initialTurnId": "",
+      "events": [
+        { "v": "1", "seq": 1, "conversationId": "c1", "turnId": "t1", "type": "turn.started", "at": "2026-01-02T03:04:05.001Z" },
+        { "v": "1", "seq": 2, "conversationId": "c1", "turnId": "t1", "type": "turn.failed", "data": { "code": "interrupted", "message": "server restart" }, "at": "2026-01-02T03:04:05.002Z" }
+      ],
+      "expected": {
+        "turnId": "t1",
+        "state": "interrupted",
+        "text": "",
+        "tools": [],
+        "usage": null,
+        "error": { "code": "interrupted", "message": "server restart" },
+        "proposals": [],
+        "lastSeq": 2
+      }
+    },
+    {
+      "name": "proposals_revision_ordering",
+      "initialTurnId": "",
+      "events": [
+        {
+          "v": "1", "seq": 1, "conversationId": "c1", "turnId": "t1", "type": "proposal.created",
+          "data": {
+            "proposal": {
+              "id": "p1", "conversationId": "c1", "turnId": "t1", "tool": "create_items",
+              "location": "server", "arguments": { "title": "Buy milk" }, "argumentsHash": "sha256:abc",
+              "state": "succeeded", "revision": 4, "createdAt": "2026-01-02T03:04:05Z", "updatedAt": "2026-01-02T03:04:05Z"
+            }
+          },
+          "at": "2026-01-02T03:04:05.001Z"
+        },
+        {
+          "v": "1", "seq": 2, "conversationId": "c1", "turnId": "t1", "type": "proposal.updated",
+          "data": {
+            "proposal": {
+              "id": "p1", "conversationId": "c1", "turnId": "t1", "tool": "create_items",
+              "location": "server", "arguments": { "title": "Buy milk" }, "argumentsHash": "sha256:abc",
+              "state": "pending", "revision": 2, "createdAt": "2026-01-02T03:04:05Z", "updatedAt": "2026-01-02T03:04:05Z"
+            }
+          },
+          "at": "2026-01-02T03:04:05.002Z"
+        },
+        {
+          "v": "1", "seq": 3, "conversationId": "c1", "turnId": "t1", "type": "proposal.updated",
+          "data": {
+            "proposal": {
+              "id": "p1", "conversationId": "c1", "turnId": "t1", "tool": "create_items",
+              "location": "server", "arguments": { "title": "Buy milk" }, "argumentsHash": "sha256:abc",
+              "state": "executing", "revision": 4, "createdAt": "2026-01-02T03:04:05Z", "updatedAt": "2026-01-02T03:04:05Z"
+            }
+          },
+          "at": "2026-01-02T03:04:05.003Z"
+        }
+      ],
+      "expected": {
+        "turnId": "t1",
+        "state": "",
+        "text": "",
+        "tools": [],
+        "usage": null,
+        "error": null,
+        "proposals": [
+          {
+            "id": "p1", "conversationId": "c1", "turnId": "t1", "tool": "create_items",
+            "location": "server", "arguments": { "title": "Buy milk" }, "argumentsHash": "sha256:abc",
+            "state": "executing", "revision": 4, "createdAt": "2026-01-02T03:04:05Z", "updatedAt": "2026-01-02T03:04:05Z"
+          }
+        ],
+        "lastSeq": 3
+      }
+    },
+    {
+      "name": "sequence_gap_error",
+      "initialTurnId": "",
+      "events": [
+        { "v": "1", "seq": 1, "conversationId": "c1", "turnId": "t1", "type": "turn.started", "at": "2026-01-02T03:04:05.001Z" },
+        { "v": "1", "seq": 3, "conversationId": "c1", "turnId": "t1", "type": "text.delta", "data": { "text": "x" }, "at": "2026-01-02T03:04:05.003Z" }
+      ],
+      "expectedErrorCode": "sequence_gap"
+    },
+    {
+      "name": "foreign_turn_error",
+      "initialTurnId": "",
+      "events": [
+        { "v": "1", "seq": 1, "conversationId": "c1", "turnId": "t1", "type": "turn.started", "at": "2026-01-02T03:04:05.001Z" },
+        { "v": "1", "seq": 2, "conversationId": "c1", "turnId": "other", "type": "text.delta", "data": { "text": "x" }, "at": "2026-01-02T03:04:05.002Z" }
+      ],
+      "expectedErrorCode": "foreign_turn"
+    },
+    {
+      "name": "after_terminal_error",
+      "initialTurnId": "",
+      "events": [
+        { "v": "1", "seq": 1, "conversationId": "c1", "turnId": "t1", "type": "turn.started", "at": "2026-01-02T03:04:05.001Z" },
+        { "v": "1", "seq": 2, "conversationId": "c1", "turnId": "t1", "type": "turn.completed", "at": "2026-01-02T03:04:05.002Z" },
+        { "v": "1", "seq": 3, "conversationId": "c1", "turnId": "t1", "type": "text.delta", "data": { "text": "late" }, "at": "2026-01-02T03:04:05.003Z" }
+      ],
+      "expectedErrorCode": "after_terminal"
+    },
+    {
+      "name": "invalid_event_unknown_type",
+      "initialTurnId": "",
+      "events": [
+        { "v": "1", "seq": 1, "conversationId": "c1", "turnId": "t1", "type": "turn.started", "at": "2026-01-02T03:04:05.001Z" },
+        { "v": "1", "seq": 2, "conversationId": "c1", "turnId": "t1", "type": "future.event", "data": {}, "at": "2026-01-02T03:04:05.002Z" }
+      ],
+      "expectedErrorCode": "invalid_event"
+    }
+  ],
+  "transcriptCases": [
+    {
+      "name": "rebuild_text_and_tool_outcomes",
+      "turn": { "id": "t1", "conversationId": "c1", "state": "running", "createdAt": "x", "updatedAt": "x" },
+      "messages": [
+        { "id": "m1", "conversationId": "c1", "turnId": "t1", "role": "user", "parts": [{ "type": "text", "text": "question" }], "createdAt": "x" },
+        {
+          "id": "m2", "conversationId": "c1", "turnId": "t1", "role": "assistant",
+          "parts": [
+            { "type": "text", "text": "part one" },
+            { "type": "tool_call", "callId": "a", "tool": "search", "arguments": { "q": "x" } }
+          ],
+          "createdAt": "x"
+        },
+        {
+          "id": "m3", "conversationId": "c1", "turnId": "t1", "role": "tool",
+          "parts": [{ "type": "tool_result", "callId": "a", "result": { "n": 1 } }],
+          "createdAt": "x"
+        },
+        { "id": "m4", "conversationId": "c1", "turnId": "other", "role": "assistant", "parts": [{ "type": "text", "text": "ignored" }], "createdAt": "x" }
+      ],
+      "expected": {
+        "turnId": "t1",
+        "state": "running",
+        "text": "part one",
+        "tools": [
+          { "callId": "a", "tool": "search", "arguments": { "q": "x" }, "status": "completed", "result": { "n": 1 }, "message": "" }
+        ],
+        "usage": null,
+        "error": null,
+        "proposals": [],
+        "lastSeq": 0
+      }
+    }
+  ]
+}

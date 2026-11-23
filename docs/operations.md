@@ -107,7 +107,8 @@ yet ([roadmap.md](roadmap.md)).
 ```sh
 go test -race ./...                               # root module
 (cd adapters/pocketbase && go test -race ./...)   # stock adapter
-(cd frontend/client && node --test)                          # browser client
+(cd frontend/client && node --test)               # browser client
+swift test --package-path frontend/swift          # Swift client & SwiftUI chat UI
 ```
 
 The fork adapter's tests need a throwaway PostgreSQL:
@@ -175,6 +176,17 @@ of a git repository:
 
 Chat client v0.1.9 is compatible with backend v0.1.8; a client update does
 not require a backend release.
+
+**The Swift chat package** (`frontend/swift`, `PocketBaseMCPChat`) is versioned
+and released the same way through its mirror repository
+(`github.com/compdani/pocketbase-mcp-chat-swift`), because SwiftPM requires
+`Package.swift` at the repository root:
+
+1. Set `frontend/swift/VERSION` to the release version and commit.
+2. `scripts/release-chat-swift.sh v0.1.0` checks the version and runs
+   `swift test --package-path frontend/swift`, splits `frontend/swift` with
+   `git subtree split`, tags the split commit `chat-swift/v0.1.0`, and prints
+   the push command (`MIRROR` overrides it). It pushes nothing.
 
 **Message size on the fork.** A chat message (and any other stored JSON
 payload) may be up to 4 MiB, as on stock PocketBase. The fork store raises the
