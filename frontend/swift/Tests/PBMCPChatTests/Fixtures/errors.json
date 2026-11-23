@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "httpErrors": [
+    {
+      "name": "not_found_envelope",
+      "status": 404,
+      "body": "{\"error\":{\"code\":\"not_found\",\"message\":\"Conversation not found.\"}}",
+      "expectedKind": "ChatApiError",
+      "expectedCode": "not_found",
+      "expectedMessage": "Conversation not found.",
+      "hasProposal": false
+    },
+    {
+      "name": "resync_required_409",
+      "status": 409,
+      "body": "{\"error\":{\"code\":\"resync_required\",\"message\":\"The event cursor is no longer available; reload the conversation.\"}}",
+      "expectedKind": "ResyncRequiredError",
+      "expectedCode": "resync_required",
+      "expectedMessage": "The event cursor is no longer available; reload the conversation.",
+      "hasProposal": false
+    },
+    {
+      "name": "decision_conflict_with_proposal",
+      "status": 409,
+      "body": "{\"error\":{\"code\":\"conflict\",\"message\":\"The proposal is out of date.\"},\"proposal\":{\"id\":\"p1\",\"conversationId\":\"c1\",\"tool\":\"create_items\",\"location\":\"server\",\"arguments\":{\"title\":\"Buy milk\"},\"argumentsHash\":\"sha256:abc\",\"state\":\"executing\",\"revision\":5,\"createdAt\":\"2026-01-02T03:04:05Z\",\"updatedAt\":\"2026-01-02T03:04:05Z\"}}",
+      "expectedKind": "ChatApiError",
+      "expectedCode": "conflict",
+      "expectedMessage": "The proposal is out of date.",
+      "hasProposal": true,
+      "expectedProposalState": "executing",
+      "expectedProposalRevision": 5
+    },
+    {
+      "name": "non_json_500_fallback",
+      "status": 500,
+      "statusText": "Internal Server Error",
+      "body": "<html>bad gateway</html>",
+      "expectedKind": "ChatApiError",
+      "expectedCode": "internal",
+      "expectedMessage": "Internal Server Error",
+      "hasProposal": false
+    },
+    {
+      "name": "rate_limited_empty_body",
+      "status": 429,
+      "statusText": "",
+      "body": "",
+      "expectedKind": "ChatApiError",
+      "expectedCode": "rate_limited",
+      "expectedMessage": "The request failed.",
+      "hasProposal": false
+    }
+  ],
+  "errorTextCases": [
+    { "code": "active_turn", "message": "turn-1 running", "expectedCode": "active_turn", "expectedText": "A reply is already in progress. Stop it or wait for it to finish." },
+    { "code": "unauthorized", "message": "jwt expired", "expectedCode": "unauthorized", "expectedText": "Your session has expired. Sign in again." },
+    { "code": "no_provider", "message": "raw", "expectedCode": "no_provider", "expectedText": "AI isn't set up yet. Ask an administrator to add a model provider." },
+    { "code": "provider_error", "message": "upstream 502", "expectedCode": "provider_error", "expectedText": "The AI provider refused the request. Try again, or ask an administrator to check the provider settings." },
+    { "code": "max_steps", "message": "exceeded", "expectedCode": "max_steps", "expectedText": "This question needed too many steps. Try asking something narrower." },
+    { "code": "context_too_long", "message": "limit", "expectedCode": "context_too_long", "expectedText": "This conversation is too long for the selected model. Compact it, start a new chat, or pick a model with a larger context." },
+    { "code": "error", "message": "The server could not be reached.", "expectedCode": "network", "expectedText": "Can't reach the server. Check your connection and try again." },
+    { "code": "error", "message": "No event or heartbeat for 45000ms.", "expectedCode": "timeout", "expectedText": "The server took too long to answer. Try again." },
+    { "code": "boom", "message": "sql: secret_token", "expectedCode": "unknown", "expectedText": "Something went wrong. Try again." }
+  ],
+  "proposalErrorCases": [
+    { "code": "stale", "message": "", "expectedText": "This change is out of date. Ask again for a fresh one." },
+    { "code": "expired", "message": "", "expectedText": "This change expired before it was decided." },
+    { "code": "conflict", "message": "", "expectedText": "This change was decided somewhere else. Review the latest version." },
+    { "code": "refused", "message": "Subject is required.", "expectedText": "Subject is required. Nothing was saved; the change is waiting for your decision again." },
+    { "code": "refused", "message": "", "expectedText": "The change was refused before anything was saved. It is waiting for your decision again." }
+  ]
+}

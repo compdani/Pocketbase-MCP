@@ -15,3 +15,8 @@ pb_data/
 # Raw verification logs (kept locally; the MILESTONE-*-REPORT.md files are the record)
 /verification/m4-*.txt
 /verification/checks-*.txt
+
+# SwiftPM build artifacts
+/frontend/swift/.build/
+/frontend/swift/.swiftpm/
+
